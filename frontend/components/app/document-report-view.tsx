@@ -38,12 +38,15 @@ export function hasReportView(doc: Pick<GeneratedDoc, "documentId">): boolean {
   return !!doc.documentId;
 }
 
-export function DocumentReportView({ doc, project, status, actions, onClose }: {
+export function DocumentReportView({ doc, project, status, actions, fallback, onClose }: {
   doc: GeneratedDoc;
   project?: string;
   status?: string;
   /** The page's own controls for this document (e.g. "Raise for approval"), shown first. */
   actions?: React.ReactNode;
+  /** What to show instead when the document has no page view at all — a spreadsheet or a
+   *  deck, say. Without one the reader is told, and offered the file. */
+  fallback?: React.ReactNode;
   onClose?: () => void;
 }) {
   const documentId = doc.documentId ?? null;
@@ -59,10 +62,13 @@ export function DocumentReportView({ doc, project, status, actions, onClose }: {
   });
   const name = doc.name ?? "document";
 
-  if (!documentId) return null;
+  if (!documentId) return fallback ?? null;
   if (q.isLoading) return <div className="p-6"><LoadingState variant="card" /></div>;
   if (q.isError) {
     const missing = q.error instanceof ApiRequestError && (q.error.status === 404 || q.error.status === 410);
+    // A caller with something of its own to show (the file card) shows it rather than a
+    // message about a view the reader never asked for. A rejection is still explained.
+    if (missing && fallback && !(q.error instanceof ApiRequestError && q.error.status === 410)) return <>{fallback}</>;
     return (
       <div className="mx-auto max-w-3xl p-6">
         <Callout tone={missing ? "warning" : "danger"} title={name}>
@@ -88,6 +94,7 @@ export function DocumentReportView({ doc, project, status, actions, onClose }: {
       filename={q.data.filename || name}
       project={project}
       status={status}
+      facts={q.data.derived ? [{ label: "View", value: "Read from the Word file" }] : []}
       generatedAt={new Date().toISOString()}
       actions={
         <>

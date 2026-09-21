@@ -226,21 +226,46 @@ async def artifact_page(
         raise HTTPException(status_code=404, detail="This document has no page view.")
 
     from shared.services.artifact_page import read_page_copy  # noqa: PLC0415
+    from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+    from shared.services.docx_preview import can_preview, docx_markdown  # noqa: PLC0415
 
-    markdown = await read_page_copy(
-        getattr(request.app.state, "blob_client", None), artifact.blob_path, artifact.approval_status,
-    )
+    blob_client = getattr(request.app.state, "blob_client", None)
+    filename = (artifact.blob_path or "").rsplit("/", 1)[-1]
+    markdown = await read_page_copy(blob_client, artifact.blob_path, artifact.approval_status)
+    derived = False
+    # NO PAGE COPY: READ THE DOCUMENT ITSELF. The copy exists only for documents whose
+    # agent wrote the markdown beside the file. Everything older, everything uploaded by
+    # hand, and every agent that does not (the Design agent's architecture.docx, which is
+    # what exposed this) had nothing to show but a download card. The Word file is still
+    # the document; this is a view of its text.
+    if markdown is None and blob_client is not None and can_preview(filename):
+        # A pending document's bytes sit under the tenant's `_pending` prefix until it is
+        # approved; an approved one has moved. Try where it should be, then the other.
+        locations = ([artifact.blob_path] if artifact.approval_status == "approved"
+                     else [pending_blob_path(artifact.blob_path), artifact.blob_path])
+        for location in locations:
+            try:
+                markdown = docx_markdown(await blob_client.download_bytes(location))
+            except Exception:  # noqa: BLE001 — try the other location, then answer 404
+                continue
+            if markdown:
+                derived = True
+                break
     if markdown is None:
         raise HTTPException(
             status_code=404,
-            detail="This document has no page view: it was uploaded, or generated before "
-                   "page copies were kept. The file itself is unaffected.",
+            detail="This document has no page view: it is not a Word document, or its file "
+                   "could not be read. The file itself is unaffected.",
         )
     return {
         "artifactId": str(artifact.id),
-        "filename": (artifact.blob_path or "").rsplit("/", 1)[-1],
+        "filename": filename,
         "status": artifact.approval_status or "draft",
         "markdown": markdown,
+        #: True when this is the document's text read back from the Word file rather than
+        #: the markdown its agent wrote — the page says so, so nobody mistakes a preview
+        #: for the designed document.
+        "derived": derived,
     }
 
 

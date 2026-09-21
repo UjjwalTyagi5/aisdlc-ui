@@ -1,61 +1,30 @@
 // @vitest-environment jsdom
 /**
- * The Code Review page's report and its Security / SBOM / Files tabs.
+ * The Code Review page's report, and its Files tab.
  *
- * What a reader must be able to trust: the verdict and the numbers are the review's and the
- * scanners'; a scanner that did not run is "Blocked" and its area "not established", never
- * clean; a vulnerability in a package nobody declared names the dependency that brings it
- * in and the version that fixes it; a whole-branch review says how much of the branch was
- * read.
+ * IT USED TO CARRY A SECURITY REPORT TOO — a Security tab, an SBOM tab, scanner numbers in
+ * the band — which the SECURITY agent produces (PRD 21.5 owns the scanning stack, the SBOM
+ * and the sign-off). Both pages showed the same SBOM. What a reader must be able to trust
+ * here (PRD 21.4): the verdict and the findings are the reviewer's, the report says what the
+ * change was checked against, a whole-branch review says how much of the branch was read,
+ * and security appears only as a finding with a file and a line.
  */
 import "@testing-library/jest-dom/vitest";
 
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import {
   BranchFilesView,
   CodeReviewReport,
-  SbomView,
-  SecurityView,
   approvalState,
-  groupVulnerabilities,
   reportDocumentFor,
   reviewChecklist,
-  upgradeTo,
 } from "@/components/app/code-review-report";
 import { CodeReviewArtifact, PrepareResult } from "@/lib/schemas/code-review";
 
 afterEach(cleanup);
-
-const SECURITY = {
-  scanned_at: "2026-09-16T10:00:00Z",
-  scanners: [
-    { name: "Gitleaks", purpose: "Hardcoded secrets and credentials", status: "ok", findings: 0, seconds: 0.3, message: "" },
-    { name: "Semgrep", purpose: "Static analysis (OWASP Top 10 rules)", status: "error", findings: null, seconds: 1, message: "Semgrep exited with code 2" },
-    { name: "Trivy", purpose: "Known vulnerabilities in dependencies", status: "ok", findings: 3, seconds: 0.2, message: "" },
-  ],
-  secrets: [],
-  sast: [],
-  vulnerabilities: [
-    { id: "CVE-A", severity: "critical", package: "tar", installed: "6.2.1", fixed: "7.5.19", title: "node-tar: tar: gzip bomb", manifest: "package.json" },
-    { id: "CVE-B", severity: "high", package: "tar", installed: "6.2.1", fixed: "7.5.21", title: "tar: traversal", manifest: "package.json" },
-    { id: "CVE-C", severity: "low", package: "@tootallnate/once", installed: "1.1.2", fixed: "3.0.1, 2.0.1", title: "DoS", manifest: "package.json" },
-  ],
-  sbom: {
-    components: [
-      { name: "sqlite3", declared: "^5.1.7", version: "5.1.7", license: "BSD-3-Clause", scope: "runtime", manifest: "package.json", ecosystem: "npm", version_source: "resolved at scan time", direct: true, via: "", vulnerabilities: 0 },
-      { name: "express", declared: "^4.19.2", version: "4.22.3", license: "MIT", scope: "runtime", manifest: "package.json", ecosystem: "npm", version_source: "resolved at scan time", direct: true, via: "", vulnerabilities: 0 },
-      { name: "tar", declared: "", version: "6.2.1", license: "ISC", scope: "runtime", manifest: "package.json", ecosystem: "npm", version_source: "resolved at scan time", direct: false, via: "sqlite3", vulnerabilities: 2 },
-      { name: "@tootallnate/once", declared: "", version: "1.1.2", license: "MIT", scope: "optional", manifest: "package.json", ecosystem: "npm", version_source: "resolved at scan time", direct: false, via: "sqlite3", vulnerabilities: 1 },
-      { name: "minipass", declared: "", version: "5.0.0", license: "ISC", scope: "runtime", manifest: "package.json", ecosystem: "npm", version_source: "resolved at scan time", direct: false, via: "sqlite3", vulnerabilities: 0 },
-    ],
-    manifests: ["package.json"],
-    notes: ["package.json: no lockfile is committed — versions were resolved from the declared ranges at scan time"],
-  },
-  totals: { secrets: 0, sast: 0, vulnerabilities: 3, vulnerabilities_high: 2, components: 5, vulnerable_components: 2, scanners_failed: 1 },
-};
 
 function artifact(over: Record<string, unknown> = {}) {
   return CodeReviewArtifact.parse({
@@ -72,38 +41,32 @@ function artifact(over: Record<string, unknown> = {}) {
     design_conformance: [],
     metrics: { files_changed: 0, added: 0, removed: 0 },
     scope: { mode: "repo", files_total: 20, reviewable_files: 14, lines_total: 325, reviewable_files_read: 11, files_read: ["src/index.js"], not_read: ["tests/link.test.js"], languages: { JavaScript: 8 } },
-    security: SECURITY,
-    security_summary: "Upgrade **sqlite3** to drop the vulnerable tar.",
     document: { filename: "QuickLink_Code_Review.docx", url: "http://localhost:8004/generated/u/code_review/s/output/QuickLink_Code_Review.docx" },
     ...over,
   });
 }
 
 describe("CodeReviewReport", () => {
-  it("leads with the verdict, the scanners' numbers and the report download", () => {
+  it("leads with the verdict, the review's own numbers and the report download", () => {
     render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}} />);
     expect(screen.getByRole("heading", { level: 2, name: "QuickLink — Request changes" })).toBeInTheDocument();
     expect(screen.getByText(/Whole branch · feature\/116-117-link-management/)).toBeInTheDocument();
     expect(screen.getByText("the whole branch feature/116-117-link-management")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Download report/ })).toHaveAttribute("href", expect.stringContaining("QuickLink_Code_Review.docx"));
-    expect(screen.getByText("2 high or critical")).toBeInTheDocument();
     expect(screen.getByText("11 / 14")).toBeInTheDocument();
     expect(screen.getByText("1 critical/high")).toBeInTheDocument();
+    // The band is the REVIEW's: no scanner numbers, no SBOM.
+    expect(screen.getByText("acceptance criteria met")).toBeInTheDocument();
+    expect(screen.queryByText("SBOM")).not.toBeInTheDocument();
+    expect(screen.queryByText("Vulnerabilities")).not.toBeInTheDocument();
+    expect(screen.queryByText("Secrets")).not.toBeInTheDocument();
   });
 
-  it("never shows a scanner that did not run as clean", () => {
+  it("leaves scanning, the SBOM and the sign-off to the Security agent", () => {
     render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}} />);
-    const facts = screen.getByText("Static analysis").closest("div")!;
-    expect(within(facts).getByText("—")).toBeInTheDocument();
-    expect(within(facts).getByText("not run")).toBeInTheDocument();
-    expect(screen.getAllByText("Blocked").length).toBeGreaterThan(0);
-    expect(screen.getByText(/Semgrep did not run, so the areas it checks are unknown/)).toBeInTheDocument();
-  });
-
-  it("says when a review has no security review at all", () => {
-    render(<CodeReviewReport artifact={artifact({ security: undefined })} onOpenTab={() => {}} />);
-    expect(screen.getByText(/The security checks did not run for this review/)).toBeInTheDocument();
-    expect(screen.getAllByText("not scanned").length).toBe(2);
+    expect(screen.queryByRole("heading", { name: /Security checks/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /bill of materials/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/are the\s+Security agent's report, not this one/)).toBeInTheDocument();
   });
 
   it("shows why there is no report when it could not be written", () => {
@@ -136,50 +99,8 @@ describe("CodeReviewReport", () => {
     // The findings table's rows start with the finding id (the checklist's mention ids in their detail).
     const rows = screen.getAllByRole("row").map((r) => r.textContent ?? "");
     expect(rows.findIndex((r) => r.startsWith("F-001"))).toBeLessThan(rows.findIndex((r) => r.startsWith("F-002")));
-    fireEvent.click(screen.getByRole("button", { name: "Full results" }));
-    expect(onOpenTab).toHaveBeenCalledWith("security");
-  });
-});
-
-describe("SecurityView", () => {
-  it("groups vulnerabilities per package with the fix for all and where they come from", () => {
-    render(<SecurityView artifact={artifact()} />);
-    const tarRow = screen.getAllByRole("row").find((r) => r.textContent?.startsWith("tar6.2.1"))!;
-    expect(tarRow).toHaveTextContent("2 (1 critical, 1 high)");
-    expect(tarRow).toHaveTextContent("7.5.21");
-    expect(tarRow).toHaveTextContent("sqlite3");
-    expect(screen.getByText("gzip bomb")).toBeInTheDocument();
-    expect(screen.getByText("No hardcoded secrets were detected.")).toBeInTheDocument();
-    expect(screen.getByText("Static analysis did not run.")).toBeInTheDocument();
-  });
-
-  it("computes the upgrade that fixes every vulnerability", () => {
-    expect(upgradeTo(["7.5.19", "7.5.3", "7.5.21"])).toBe("7.5.21");
-    expect(upgradeTo(["3.0.1, 2.0.1"])).toBe("3.0.1");
-    expect(upgradeTo(["7.5.3", ""])).toBe("");
-    const groups = groupVulnerabilities(artifact().security!);
-    expect(groups[0]).toMatchObject({ package: "tar", worst: "critical", count: 2, upgrade: "7.5.21", via: "sqlite3" });
-  });
-});
-
-describe("SbomView", () => {
-  it("starts on direct dependencies and filters to vulnerable ones", () => {
-    const packages = () => screen.getAllByRole("row").slice(1).map((r) => r.querySelector("td")?.textContent);
-    render(<SbomView artifact={artifact()} />);
-    expect(packages()).toEqual(["express", "sqlite3"]);
-    fireEvent.click(screen.getByRole("button", { name: "Vulnerable" }));
-    expect(packages()).toEqual(["tar", "@tootallnate/once"]);
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
-    expect(packages()).toContain("minipass");
-    expect(screen.getByText(/no lockfile is committed/)).toBeInTheDocument();
-  });
-
-  it("shows 'not checked' when the vulnerability scanner did not run", () => {
-    const security = { ...SECURITY, scanners: SECURITY.scanners.map((s) => (s.name === "Trivy" ? { ...s, status: "error", findings: null } : s)),
-      sbom: { ...SECURITY.sbom, components: SECURITY.sbom.components.map((c) => ({ ...c, vulnerabilities: null })) } };
-    render(<SbomView artifact={artifact({ security })} />);
-    expect(screen.getAllByText("not checked").length).toBe(2);
-    expect(screen.getByText("Vulnerabilities not checked")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "All findings" }));
+    expect(onOpenTab).toHaveBeenCalledWith("findings");
   });
 });
 
@@ -275,17 +196,19 @@ describe("CodeReviewReport as a code review report", () => {
     render(<CodeReviewReport artifact={artifact()} onOpenTab={() => {}} />);
     expect(screen.getByText("Code review report", { exact: false })).toBeInTheDocument();
     expect(screen.queryByText(/security report/i)).not.toBeInTheDocument();
-    for (const check of ["Whole change read", "Security checks run", "Meets the approved requirements",
+    for (const check of ["Whole change read", "Security issues in the code", "Meets the approved requirements",
       "Follows the approved architecture", "Logic and correctness", "Merge recommendation"]) {
       expect(screen.getByText(check)).toBeInTheDocument();
     }
   });
 
   it("never marks a check done that nothing established", () => {
-    const rows = reviewChecklist(artifact({ security: undefined, requirements_coverage: [], design_conformance: [] }));
+    const rows = reviewChecklist(artifact({ requirements_coverage: [], design_conformance: [] }));
     const byCheck = Object.fromEntries(rows.map((r) => [r.check, r.result]));
-    expect(byCheck["Security checks run"]).toBe("Not run");
     expect(byCheck["Meets the approved requirements"]).toBe("Not checked");
     expect(byCheck["Follows the approved architecture"]).toBe("Not checked");
+    // The security row is the reviewer's own finding — never a claim about a scan.
+    expect(byCheck["Security issues in the code"]).toBe("Issues found");
+    expect(Object.keys(byCheck)).not.toContain("Security checks run");
   });
 });

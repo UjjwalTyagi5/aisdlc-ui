@@ -24,7 +24,6 @@ from agents_orchestrator.code_review_agent.tools.diff_tool import analyze_diff
 from agents_orchestrator.code_review_agent.tools.review_tools import (
     list_repo_files,
     read_repo_file,
-    run_security_review,
     search_repo,
     read_requirements_payload,
     read_design_artifacts,
@@ -93,7 +92,6 @@ except Exception:  # noqa: BLE001 — a missing optional tool must not break the
     logger.warning("Code review agent: Confluence document tools unavailable")
 
 _tools = [
-    run_security_review,
     list_repo_files,
     run_semgrep_scan,
     analyze_diff,
@@ -290,7 +288,7 @@ _REVIEW_REQUEST_RE = re.compile(r"\b(?:re-?)?review\s+(?:the|this|that|my|it)\b"
 
 def _is_review_turn(state: AgentState) -> bool:
     """True when this turn is a review: the reader asked for one, or the agent started the
-    review workflow (run_security_review is its first step, and submit refuses without it).
+    review workflow (reading the branch or the diff is its first step).
 
     THE NUDGE FIRED ON EVERY TURN THAT DID NOT SUBMIT. Asked only "Send the review report
     for approval.", the agent answered correctly — and was then made to call
@@ -304,7 +302,7 @@ def _is_review_turn(state: AgentState) -> bool:
     for m in turn:
         for tc in getattr(m, "tool_calls", None) or []:
             name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-            if name == "run_security_review":
+            if name in ("list_repo_files", "analyze_diff", "run_semgrep_scan"):
                 return True
     return False
 

@@ -157,6 +157,9 @@ export const ArtifactPage = z.object({
   filename: z.string(),
   status: z.string(),
   markdown: z.string(),
+  /** True when the backend read the text back from the Word file because the document
+   *  has no page copy — a preview of the file, not the markdown its agent wrote. */
+  derived: z.boolean().default(false),
 });
 export type ArtifactPage = z.infer<typeof ArtifactPage>;
 

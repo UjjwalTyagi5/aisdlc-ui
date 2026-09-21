@@ -2,15 +2,12 @@
 
 import * as React from "react";
 import {
-  Boxes,
-  Bug,
   Check,
+  ClipboardCheck,
   Download,
   FileSearch,
-  KeyRound,
   ListChecks,
   Loader2,
-  ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
 
@@ -42,24 +39,23 @@ import type { Artifact } from "@/lib/schemas";
 import type {
   CodeReviewArtifact,
   PrepareResult,
-  SbomComponent,
-  SecurityScan,
 } from "@/lib/schemas/code-review";
 
 /**
- * The Code Review agent's review, as a report — and its Security, SBOM and Files tabs.
+ * The Code Review agent's review, as a report — and its Findings, Checklist and Files tabs.
  *
- * TWO SOURCES, KEPT APART. The verdict, summary and findings are the reviewer's; the
- * security results and SBOM are the scanners' (backend code_security_scan.py). A
- * scanner that did not run is "Blocked" and its area "not established" — never shown as
- * a clean result — and a vulnerability in a package nobody declared names the direct
- * dependency that brings it in, which is the part a developer can act on.
+ * WHAT THIS REPORT IS, AND WHAT IT IS NOT. It is the review of a change: the verdict, the
+ * findings, whether the code meets the APPROVED requirements and follows the APPROVED
+ * design (PRD 21.4). It carried the scanners' output too — vulnerabilities, secrets, an
+ * SBOM — so this page and the Security page showed the same SBOM and neither was the
+ * answer. Scanning, the SBOM and the security sign-off are the Security agent's (PRD 21.5);
+ * security appears here only as a reviewer's finding, with a file and a line.
  *
  * The same document is written as Word (backend review_document.py); the band's
  * download link opens it.
  */
 
-export type ReviewTab = "summary" | "findings" | "security" | "sbom" | "checklist" | "files" | "diff" | "documents";
+export type ReviewTab = "summary" | "findings" | "checklist" | "files" | "diff" | "documents";
 
 export { approvalState, type ReportApproval };
 
@@ -107,81 +103,12 @@ function targetPhrase(ctx: CodeReviewArtifact["context"]): string {
   return `the changes on ${ctx.source_branch} since it left ${ctx.base_branch}`;
 }
 
-/** No scanners recorded = the review predates the security review, or it did not run. */
-export function scanRan(security: SecurityScan | undefined): security is SecurityScan {
-  return !!security && security.scanners.length > 0;
-}
-
-function scannerOk(security: SecurityScan | undefined, name: string): boolean {
-  return !!security?.scanners.some((s) => s.name === name && s.status === "ok");
-}
-
-function versionKey(v: string): (number | string)[] {
-  return v.split(/[.+-]/).map((p) => (/^\d+$/.test(p) ? Number(p) : p));
-}
-
-function compareVersions(a: string, b: string): number {
-  const x = versionKey(a);
-  const y = versionKey(b);
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const p = x[i] ?? 0;
-    const q = y[i] ?? 0;
-    if (p === q) continue;
-    if (typeof p === "number" && typeof q === "number") return p - q;
-    return String(p).localeCompare(String(q));
-  }
-  return 0;
-}
-
-/** The version that fixes every listed vulnerability — mirrors review_document._upgrade_to. */
-export function upgradeTo(fixes: string[]): string {
-  const perCve: string[] = [];
-  for (const fixed of fixes) {
-    const options = (fixed || "").split(",").map((o) => o.trim()).filter(Boolean);
-    if (options.length === 0) return "";
-    perCve.push(options.sort(compareVersions).at(-1)!);
-  }
-  return perCve.sort(compareVersions).at(-1) ?? "";
-}
-
-export function groupVulnerabilities(security: SecurityScan) {
-  const via = new Map(security.sbom.components.map((c) => [`${c.name}@${c.version}`, c.via]));
-  const groups = new Map<string, SecurityScan["vulnerabilities"]>();
-  for (const v of security.vulnerabilities) {
-    const key = `${v.package}@${v.installed}`;
-    groups.set(key, [...(groups.get(key) ?? []), v]);
-  }
-  return [...groups.entries()]
-    .map(([key, items]) => {
-      const worst = items.reduce((w, i) => ((SEV_RANK[i.severity] ?? 9) < (SEV_RANK[w] ?? 9) ? i.severity : w), items[0]!.severity);
-      const counts = new Map<string, number>();
-      for (const i of items) counts.set(i.severity, (counts.get(i.severity) ?? 0) + 1);
-      return {
-        package: items[0]!.package,
-        installed: items[0]!.installed,
-        worst,
-        count: items.length,
-        breakdown: [...counts.entries()].sort((a, b) => (SEV_RANK[a[0]] ?? 9) - (SEV_RANK[b[0]] ?? 9)).map(([s, n]) => `${n} ${s}`).join(", "),
-        upgrade: upgradeTo(items.map((i) => i.fixed)) || "no fix released",
-        via: via.get(key) || "direct dependency",
-      };
-    })
-    .sort((a, b) => (SEV_RANK[a.worst] ?? 9) - (SEV_RANK[b.worst] ?? 9) || a.package.localeCompare(b.package));
-}
-
-function shortTitle(t: string, pkg: string): string {
-  let out = t || "";
-  const re = new RegExp(`^\\s*(?:node-)?${pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*`, "i");
-  for (let i = 0; i < 3; i++) out = out.replace(re, "");
-  return out.trim();
-}
-
 /* ── The standard review checklist ─────────────────────────────────────────── */
 
 export interface ChecklistRow { check: string; result: string; detail: string }
 
 const CHECK_TONE: Record<string, PillTone> = {
-  Done: "success", "No issues": "success", Partial: "warning", "Not run": "warning",
+  Done: "success", "No issues": "success", "None found": "success", Partial: "warning", "Not run": "warning",
   "Not checked": "neutral", Gaps: "danger", Deviations: "warning", "Issues found": "danger",
 };
 
@@ -192,9 +119,6 @@ const CHECK_TONE: Record<string, PillTone> = {
  */
 export function reviewChecklist(artifact: CodeReviewArtifact): ChecklistRow[] {
   const findings = artifact.findings;
-  const security = artifact.security;
-  const scanners = security?.scanners ?? [];
-  const totals = security?.totals ?? {};
   const scope = artifact.scope ?? {};
   const rows: ChecklistRow[] = [];
 
@@ -206,24 +130,15 @@ export function reviewChecklist(artifact: CodeReviewArtifact): ChecklistRow[] {
     rows.push({ check: "Whole change read", result: "Done", detail: `${scope.files_changed ?? artifact.metrics.files_changed ?? 0} changed files reviewed` });
   }
 
-  if (scanners.length === 0) {
-    rows.push({ check: "Security checks run", result: "Not run", detail: "secrets, static analysis and dependency scans did not run" });
-  } else {
-    const notRun = scanners.filter((sc) => sc.status !== "ok");
-    const parts = scanners.map((sc) =>
-      sc.status !== "ok" ? `${sc.name}: not run`
-        : sc.name === "Trivy" ? `Trivy: ${totals.vulnerabilities ?? 0} vulnerabilities (${totals.vulnerabilities_high ?? 0} high+)`
-          : `${sc.name}: ${sc.findings ?? 0} findings`);
-    rows.push({ check: "Security checks run", result: notRun.length ? "Partial" : "Done", detail: parts.join("; ") });
-  }
-
+  // SECURITY AS THE REVIEWER SEES IT. Two rows here were filled from a scanner pass this
+  // agent ran — the same one the Security agent runs (PRD 21.5 owns the stack and the SBOM).
   const blocking = findings.filter((f) => f.category === "security" && (f.severity === "critical" || f.severity === "high"));
-  const secrets = totals.secrets ?? 0;
   rows.push({
-    check: "Security issues resolved",
-    result: blocking.length || secrets > 0 ? "Issues found" : "No issues",
-    detail: (blocking.length ? `${blocking.length} critical/high security finding(s)` : "no critical/high security finding")
-      + (secrets > 0 ? `; ${secrets} hardcoded secret(s)` : ""),
+    check: "Security issues in the code",
+    result: blocking.length ? "Issues found" : "None found",
+    detail: blocking.length
+      ? `${blocking.length} critical/high security finding(s) in this review`
+      : "no critical/high security finding in this review; the scan is the Security agent's",
   });
 
   const coverage = artifact.requirements_coverage;
@@ -263,29 +178,27 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
 }) {
   const ctx = artifact.context;
   const verdict = VERDICT[artifact.merge_recommendation] ?? VERDICT.needs_discussion!;
-  const security = artifact.security;
-  const ran = scanRan(security);
-  const totals = security?.totals ?? {};
   const scope = artifact.scope ?? {};
   const findings = artifact.findings;
   const critHigh = findings.filter((f) => f.severity === "critical" || f.severity === "high").length;
-  const direct = security?.sbom.components.filter((c) => c.direct).length ?? 0;
   const isBranch = ctx.mode === "repo";
   const readPct = isBranch && scope.reviewable_files ? (100 * (scope.reviewable_files_read ?? 0)) / scope.reviewable_files : null;
-  const blocked = ran ? security.scanners.filter((s) => s.status !== "ok") : [];
+  const coverage = artifact.requirements_coverage ?? [];
+  const met = coverage.filter((c) => c.status === "satisfied").length;
+  const conformance = artifact.design_conformance ?? [];
+  const conforms = conformance.filter((c) => c.status === "conforms").length;
 
+  // THE REVIEW'S OWN NUMBERS. These were the scanners' — vulnerabilities, secrets, SBOM —
+  // which is the Security agent's report (PRD 21.5). What a reviewer is asked for is
+  // whether the change meets the approved spec and whether it should merge.
   const facts: Fact[] = [
     { label: "Findings", icon: ListChecks, value: findings.length, hint: `${critHigh} critical/high`, tone: critHigh ? "danger" : "success" },
-    ran && scannerOk(security, "Trivy")
-      ? { label: "Vulnerabilities", icon: Bug, value: totals.vulnerabilities ?? 0, hint: `${totals.vulnerabilities_high ?? 0} high or critical`, tone: (totals.vulnerabilities_high ?? 0) > 0 ? "danger" : (totals.vulnerabilities ?? 0) > 0 ? "warning" : "success" }
-      : { label: "Vulnerabilities", icon: Bug, value: "—", hint: "not scanned", tone: "warning" },
-    ran && scannerOk(security, "Gitleaks")
-      ? { label: "Secrets", icon: KeyRound, value: totals.secrets ?? 0, hint: "hardcoded", tone: (totals.secrets ?? 0) > 0 ? "danger" : "success" }
-      : { label: "Secrets", icon: KeyRound, value: "—", hint: "not scanned", tone: "warning" },
-    ran && scannerOk(security, "Semgrep")
-      ? { label: "Static analysis", icon: ShieldAlert, value: totals.sast ?? 0, hint: "OWASP Top 10", tone: (totals.sast ?? 0) > 0 ? "warning" : "success" }
-      : { label: "Static analysis", icon: ShieldAlert, value: "—", hint: "not run", tone: "warning" },
-    { label: "SBOM", icon: Boxes, value: ran ? (totals.components ?? 0) : "—", hint: ran ? `${direct} direct` : "not built" },
+    coverage.length
+      ? { label: "Requirements", icon: ClipboardCheck, value: `${met} / ${coverage.length}`, hint: "acceptance criteria met", tone: met < coverage.length ? "warning" : "success" }
+      : { label: "Requirements", icon: ClipboardCheck, value: "—", hint: "not checked", tone: "warning" },
+    conformance.length
+      ? { label: "Design", icon: ShieldCheck, value: `${conforms} / ${conformance.length}`, hint: "rules conform", tone: conforms < conformance.length ? "warning" : "success" }
+      : { label: "Design", icon: ShieldCheck, value: "—", hint: "not checked", tone: "warning" },
     isBranch
       ? { label: "Scope", icon: FileSearch, value: `${scope.reviewable_files_read ?? 0} / ${scope.reviewable_files ?? 0}`, hint: "files read", tone: readPct !== null && readPct < 60 ? "warning" : "default" }
       : { label: "Scope", icon: FileSearch, value: scope.files_changed ?? artifact.metrics.files_changed, hint: "files changed" },
@@ -351,29 +264,6 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
 
       <ReportSection
         n={3}
-        title="Security checks"
-        id="cr-security"
-        aside={ran ? <button type="button" className="text-primary hover:underline" onClick={() => onOpenTab("security")}>Full results</button> : undefined}
-      >
-        {!ran ? (
-          <Callout tone="warning" title="Not established">
-            The security checks did not run for this review, so nothing about the code&apos;s security is established.
-          </Callout>
-        ) : (
-          <>
-            {artifact.security_summary && <MarkdownBody markdown={artifact.security_summary} />}
-            <ScannersTable security={security} />
-            {blocked.length > 0 && (
-              <Callout tone="warning" title="Not established">
-                {blocked.map((s) => s.name).join(", ")} did not run, so the areas {blocked.length === 1 ? "it checks are" : "they check are"} unknown — not clean.
-              </Callout>
-            )}
-          </>
-        )}
-      </ReportSection>
-
-      <ReportSection
-        n={4}
         title="Findings"
         id="cr-findings"
         aside={findings.length ? <button type="button" className="text-primary hover:underline" onClick={() => onOpenTab("findings")}>All findings</button> : undefined}
@@ -397,7 +287,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
         )}
       </ReportSection>
 
-      <ReportSection n={5} title="Requirements and design" id="cr-requirements">
+      <ReportSection n={4} title="Requirements and design" id="cr-requirements">
         {artifact.requirements_coverage.length === 0 && artifact.design_conformance.length === 0 ? (
           <Callout>No requirements coverage or design conformance was recorded for this review.</Callout>
         ) : (
@@ -428,7 +318,7 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
         )}
       </ReportSection>
 
-      <ReportSection n={6} title="Scope and method" id="cr-scope">
+      <ReportSection n={5} title="Scope and method" id="cr-scope">
         <div className="space-y-3 text-sm">
           <p>
             Reviewed <span className="font-medium">{targetPhrase(ctx)}</span> in <span className="font-medium">{ctx.repo_name}</span>
@@ -472,220 +362,14 @@ export function CodeReviewReport({ artifact, onOpenTab, approval }: {
               : scope.documents
                 ? "; the project had no approved requirements or design document to check it against"
                 : ""}
-            . The security results and SBOM come from
-            the scanners{ran ? ` (${security.scanners.map((s) => `${s.name}: ${s.status === "ok" ? "ran" : s.status}`).join("; ")})` : ""}, not from the reviewer.
+            . Dependency vulnerabilities, secrets, the SBOM and the security sign-off are the
+            Security agent&apos;s report, not this one.
           </p>
         </div>
       </ReportSection>
     </article>
   );
 }
-
-function ScannersTable({ security }: { security: SecurityScan }) {
-  return (
-    <ReportTable dense head={<><th className={th}>Scanner</th><th className={th}>What it checks</th><th className={cn(th, "w-24")}>Result</th><th className={cn(th, "w-20 text-right")}>Findings</th><th className={th}>Note</th></>}>
-      {security.scanners.map((s) => {
-        const ok = s.status === "ok";
-        const result = ok ? (s.findings ? "Failed" : "Passed") : "Blocked";
-        return (
-          <tr key={s.name}>
-            <td className={cn(td, "font-medium")}>{s.name}</td>
-            <td className={cn(td, "text-muted-foreground")}>{s.purpose}</td>
-            <td className={td}><Pill tone={result === "Passed" ? "success" : result === "Failed" ? "danger" : "warning"}>{result}</Pill></td>
-            <td className={cn(td, "text-right tabular-nums")}>{ok ? s.findings ?? 0 : "not run"}</td>
-            <td className={cn(td, "text-muted-foreground text-xs")}>{s.message || (ok && s.seconds != null ? `Ran in ${s.seconds} s` : s.status)}</td>
-          </tr>
-        );
-      })}
-    </ReportTable>
-  );
-}
-
-/* ── Security tab ───────────────────────────────────────────────────────────── */
-
-export function SecurityView({ artifact }: { artifact: CodeReviewArtifact | null }) {
-  const security = artifact?.security;
-  if (!artifact || !scanRan(security)) {
-    return (
-      <div className="mx-auto max-w-xl px-4 py-12">
-        <EmptyState
-          icon={ShieldCheck}
-          title={artifact ? "No security review on this review" : "No security review yet"}
-          description={artifact
-            ? "This review was saved before the security review existed, or it did not run. Run a new review to scan the branch."
-            : "Run the review: the security review scans the whole checked-out branch for secrets, OWASP Top 10 issues and vulnerable dependencies."}
-          variant="plain"
-        />
-      </div>
-    );
-  }
-  const groups = groupVulnerabilities(security);
-  const vulns = [...security.vulnerabilities].sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9));
-  return (
-    <div className="mx-auto max-w-5xl space-y-8 p-4 md:p-6">
-      <ReportSection n={1} title="Scanners" id="sec-scanners">
-        <ScannersTable security={security} />
-      </ReportSection>
-
-      <ReportSection n={2} title="Vulnerable dependencies" id="sec-vulns" aside={vulns.length ? `${vulns.length} vulnerabilities` : undefined}>
-        {!scannerOk(security, "Trivy") ? (
-          <Callout tone="warning" title="Not established">Dependencies were not checked — the vulnerability scanner did not run.</Callout>
-        ) : groups.length === 0 ? (
-          <Callout tone="success">No known vulnerabilities were found in the dependencies.</Callout>
-        ) : (
-          <div className="space-y-4">
-            <ReportTable dense head={<><th className={th}>Package</th><th className={th}>Installed</th><th className={cn(th, "w-24")}>Severity</th><th className={th}>Vulnerabilities</th><th className={th}>Upgrade to</th><th className={th}>Brought in by</th></>}>
-              {groups.map((g) => (
-                <tr key={`${g.package}@${g.installed}`}>
-                  <td className={cn(td, "font-medium")}>{g.package}</td>
-                  <td className={cn(td, "font-mono text-xs")}>{g.installed}</td>
-                  <td className={td}><Pill tone={severityTone(g.worst)}>{title(g.worst)}</Pill></td>
-                  <td className={td}>{g.count} <span className="text-muted-foreground text-xs">({g.breakdown})</span></td>
-                  <td className={cn(td, "font-mono text-xs")}>{g.upgrade}</td>
-                  <td className={td}>{g.via}</td>
-                </tr>
-              ))}
-            </ReportTable>
-            <ReportTable dense head={<><th className={th}>Vulnerability</th><th className={cn(th, "w-24")}>Severity</th><th className={th}>Package</th><th className={th}>Issue</th><th className={th}>Fixed in</th></>}>
-              {vulns.map((v, i) => (
-                <tr key={`${v.id}-${i}`}>
-                  <td className={cn(td, "font-mono text-[11px] font-semibold whitespace-nowrap")}>{v.id}</td>
-                  <td className={td}><Pill tone={severityTone(v.severity)}>{title(v.severity)}</Pill></td>
-                  <td className={cn(td, "whitespace-nowrap")}>{v.package} <span className="text-muted-foreground font-mono text-xs">{v.installed}</span></td>
-                  <td className={td}>{shortTitle(v.title, v.package) || "—"}</td>
-                  <td className={cn(td, "font-mono text-xs")}>{v.fixed || "—"}</td>
-                </tr>
-              ))}
-            </ReportTable>
-          </div>
-        )}
-      </ReportSection>
-
-      <ReportSection n={3} title="Hardcoded secrets" id="sec-secrets">
-        {!scannerOk(security, "Gitleaks") ? (
-          <Callout tone="warning" title="Not established">Secrets were not scanned — the scanner did not run.</Callout>
-        ) : security.secrets.length === 0 ? (
-          <Callout tone="success">No hardcoded secrets were detected.</Callout>
-        ) : (
-          <>
-            <ReportTable dense head={<><th className={th}>Rule</th><th className={th}>Location</th><th className={th}>Description</th></>}>
-              {security.secrets.map((s, i) => (
-                <tr key={i} className="shadow-[inset_3px_0_0_0_var(--destructive)]">
-                  <td className={cn(td, "font-mono text-xs")}>{s.rule}</td>
-                  <td className={cn(td, "font-mono text-xs")}>{s.file}{s.line ? `:${s.line}` : ""}</td>
-                  <td className={td}>{s.description}</td>
-                </tr>
-              ))}
-            </ReportTable>
-            <Callout tone="danger">Secret values are redacted. Rotate every exposed credential, then remove it from the code and its history.</Callout>
-          </>
-        )}
-      </ReportSection>
-
-      <ReportSection n={4} title="Static analysis" id="sec-sast">
-        {!scannerOk(security, "Semgrep") ? (
-          <Callout tone="warning" title="Not established">Static analysis did not run.</Callout>
-        ) : security.sast.length === 0 ? (
-          <Callout tone="success">Static analysis found no OWASP Top 10 issues.</Callout>
-        ) : (
-          <ReportTable dense head={<><th className={cn(th, "w-24")}>Severity</th><th className={th}>Rule</th><th className={th}>Location</th><th className={th}>Message</th></>}>
-            {[...security.sast].sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9)).map((f, i) => (
-              <tr key={i}>
-                <td className={td}><Pill tone={severityTone(f.severity)}>{title(f.severity)}</Pill></td>
-                <td className={cn(td, "font-mono text-xs")}>{f.rule.split(".").at(-1)}</td>
-                <td className={cn(td, "font-mono text-xs break-all")}>{f.file}{f.line ? `:${f.line}` : ""}</td>
-                <td className={td}>{f.message}</td>
-              </tr>
-            ))}
-          </ReportTable>
-        )}
-      </ReportSection>
-    </div>
-  );
-}
-
-/* ── SBOM tab ───────────────────────────────────────────────────────────────── */
-
-type SbomFilter = "all" | "direct" | "vulnerable";
-
-export function SbomView({ artifact }: { artifact: CodeReviewArtifact | null }) {
-  const [filter, setFilter] = React.useState<SbomFilter>("direct");
-  const [query, setQuery] = React.useState("");
-  const [limit, setLimit] = React.useState(200);
-  const security = artifact?.security;
-  const components: SbomComponent[] = React.useMemo(() => security?.sbom.components ?? [], [security]);
-  const shown = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return components
-      .filter((c) => (filter === "direct" ? c.direct : filter === "vulnerable" ? (c.vulnerabilities ?? 0) > 0 : true))
-      .filter((c) => !q || c.name.toLowerCase().includes(q) || c.license.toLowerCase().includes(q) || c.via.toLowerCase().includes(q))
-      .sort((a, b) => (b.vulnerabilities ?? 0) - (a.vulnerabilities ?? 0) || Number(b.direct) - Number(a.direct) || a.name.localeCompare(b.name));
-  }, [components, filter, query]);
-
-  if (!artifact || !scanRan(security)) {
-    return (
-      <div className="mx-auto max-w-xl px-4 py-12">
-        <EmptyState icon={Boxes} title="No SBOM yet" description="The SBOM is built by the security review when the review runs." variant="plain" />
-      </div>
-    );
-  }
-  const direct = components.filter((c) => c.direct).length;
-  const vulnerable = components.filter((c) => (c.vulnerabilities ?? 0) > 0).length;
-  return (
-    <div className="mx-auto max-w-6xl space-y-4 p-4 md:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm">
-          <span className="font-display text-lg font-semibold tabular-nums">{components.length}</span> components across{" "}
-          {security.sbom.manifests.length} manifest(s) · {direct} direct · {components.length - direct} transitive ·{" "}
-          <span className={cn(vulnerable ? "text-red-700 dark:text-red-400" : "")}>{vulnerable} vulnerable</span>
-        </p>
-        <div className="flex items-center gap-2">
-          {(["direct", "vulnerable", "all"] as const).map((f) => (
-            <Button key={f} size="sm" variant={filter === f ? "default" : "outline"} className="h-8 text-xs" onClick={() => setFilter(f)} aria-pressed={filter === f}>
-              {f === "direct" ? "Direct" : f === "vulnerable" ? "Vulnerable" : "All"}
-            </Button>
-          ))}
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filter by name, licence…"
-            aria-label="Filter components"
-            className="border-line-soft bg-surface-1 h-8 w-48 rounded-md border px-2 text-xs"
-          />
-        </div>
-      </div>
-      {security.sbom.notes.map((n) => <Callout key={n} className="text-xs">{n}</Callout>)}
-      {!scannerOk(security, "Trivy") && (
-        <Callout tone="warning" title="Vulnerabilities not checked">The vulnerability scanner did not run, so no component&apos;s vulnerability status is known.</Callout>
-      )}
-      {shown.length === 0 ? (
-        <Callout>No components match.</Callout>
-      ) : (
-        <ReportTable dense head={<><th className={th}>Package</th><th className={th}>Version</th><th className={th}>Declared</th><th className={th}>Licence</th><th className={th}>Scope</th><th className={th}>Brought in by</th><th className={cn(th, "text-right")}>Vulnerabilities</th></>}>
-          {shown.slice(0, limit).map((c) => (
-            <tr key={`${c.manifest}:${c.name}@${c.version}:${c.via}`}>
-              <td className={cn(td, c.direct && "font-medium")}>{c.name}</td>
-              <td className={cn(td, "font-mono text-xs")} title={c.version_source}>{c.version || "—"}</td>
-              <td className={cn(td, "text-muted-foreground font-mono text-xs")}>{c.declared || "—"}</td>
-              <td className={cn(td, "text-xs")}>{c.license || "—"}</td>
-              <td className={cn(td, "text-xs")}>{c.scope}</td>
-              <td className={cn(td, "text-xs")}>{c.direct ? <span className="text-muted-foreground">direct</span> : c.via || "—"}</td>
-              <td className={cn(td, "text-right")}>
-                {c.vulnerabilities == null ? <span className="text-muted-foreground text-xs">not checked</span>
-                  : c.vulnerabilities > 0 ? <Pill tone="danger">{c.vulnerabilities}</Pill> : <span className="text-muted-foreground tabular-nums">0</span>}
-              </td>
-            </tr>
-          ))}
-        </ReportTable>
-      )}
-      {shown.length > limit && (
-        <Button variant="outline" size="sm" onClick={() => setLimit((l) => l + 200)}>Show {Math.min(200, shown.length - limit)} more of {shown.length - limit}</Button>
-      )}
-    </div>
-  );
-}
-
-/* ── Files tab (whole branch) ───────────────────────────────────────────────── */
 
 export function BranchFilesView({ prepared, artifact }: { prepared: PrepareResult | null; artifact: CodeReviewArtifact | null }) {
   const read = new Set(artifact?.scope?.files_read ?? []);

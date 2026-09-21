@@ -135,12 +135,28 @@ async def test_the_page_route_serves_the_copy_and_says_when_there_is_none(monkey
     monkeypatch.setattr(r, "_assert_project_visible", AsyncMock())
 
     out = await r.artifact_page("art-1", request, db=None)
-    assert out == {"artifactId": "art-1", "filename": "QuickLink_BRD.docx", "status": "draft", "markdown": "## Summary\nHi"}
+    assert out == {"artifactId": "art-1", "filename": "QuickLink_BRD.docx", "status": "draft",
+                   "markdown": "## Summary\nHi", "derived": False}
 
     art.approval_status = "approved"  # bytes moved, copy not yet — an old document
     with pytest.raises(HTTPException) as exc:
         await r.artifact_page("art-1", request, db=None)
     assert exc.value.status_code == 404 and "no page view" in exc.value.detail
+
+    # NO COPY, BUT THE WORD FILE IS THERE: the document is read back from the file itself
+    # and says so. Before this the page could only offer a download — which is what the
+    # Design agent's architecture.docx showed, since it writes no sibling markdown.
+    import io  # noqa: PLC0415
+    from docx import Document  # noqa: PLC0415
+
+    document, buffer = Document(), io.BytesIO()
+    document.add_heading("Architecture", level=1)
+    document.add_paragraph("QuickLink replaces a withdrawn public shortener.")
+    document.save(buffer)
+    await store.upload_bytes(buffer.getvalue(), BLOB)
+    out = await r.artifact_page("art-1", request, db=None)
+    assert out["derived"] is True
+    assert "# Architecture" in out["markdown"] and "withdrawn public shortener" in out["markdown"]
 
     art.approval_status = "rejected"
     with pytest.raises(HTTPException) as exc:

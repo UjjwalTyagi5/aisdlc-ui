@@ -164,6 +164,20 @@ _process_blob_client: Any = None
 _blob_client_tried = False
 
 
+def set_process_blob_client(client: Any) -> None:
+    """Hand this module the client the app already built, in the lifespan.
+
+    WHY THE APP SHOULD PRIME THIS. Built lazily instead, the client is constructed by
+    whichever caller gets there first — in practice an agent tool, inside the transient
+    `asyncio.run()` loop its graph node uses. The Azure client then treats that loop as
+    its home (see `azure_blob._service`), and when the loop ends the client has to be
+    replaced, abandoning an aiohttp session each time. Priming it from the lifespan means
+    the long-lived loop owns it and every sub-loop borrows a client it closes itself.
+    """
+    global _process_blob_client, _blob_client_tried
+    _process_blob_client, _blob_client_tried = client, True
+
+
 def get_blob_client() -> Any:
     """A process-wide BlobStorageClient, or None when blob storage is unconfigured.
 

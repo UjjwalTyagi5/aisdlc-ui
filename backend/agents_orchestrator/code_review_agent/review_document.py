@@ -1,21 +1,16 @@
-"""The Code Review Report — a submitted review, as a designed document.
+"""The Code Review agent's report: the review of a change, as a document.
 
-A CODE REVIEW REPORT, NOT A SECURITY REPORT. It was titled "Code review & security
-report", which reads as a security audit. It is the standard review of a change: was all of
-it read, were the security checks run, does it meet the approved requirements and follow the
-approved architecture, what is wrong with it, and should it merge. The security scan is one
-of those checks — see `review_checklist`.
+A CODE REVIEW REPORT, AND ONLY THAT. It was titled "Code review & security report" and
+carried the scanners' output — secrets, dependency vulnerabilities, an SBOM — which is the
+SECURITY agent's report (PRD 21.5: it owns the scanning stack, the SBOM and the sign-off).
+Both pages showed the same SBOM, and neither made the other redundant.
 
-WHAT IT IS BUILT FROM. The review artifact the agent submitted (summary, findings,
-requirements coverage, design conformance) and the security scan the SCANNERS produced
-(secrets, static analysis, vulnerable dependencies, SBOM). The document never
-re-interprets either: a scanner that did not run is shown as not run, a transitive
-vulnerability names the direct dependency that brings it in, and a whole-branch review
-states how many of the branch's files were actually read.
+What this one answers (PRD 21.4): was the whole change read, does it do what the APPROVED
+requirements say, does it follow the APPROVED design, what is wrong with it and where, and
+should it merge. Security appears the way a reviewer sees it — an injection or a credential
+in the code is a finding with a file and a line — never as a scan result or a verdict.
 
-SAME CANVAS as the BRD, the design document and the test case document
-(`shared/docs/markdown_docx`), so the platform's documents read as one family. The
-markdown is also written beside the .docx (`<name>.md`) for the page.
+Everything here is derived from the submitted review; the document never re-judges the code.
 """
 from __future__ import annotations
 
@@ -123,9 +118,6 @@ def review_checklist(artifact: dict) -> list[dict]:
     Each row is {check, result, detail}. A check nothing established says so ("Not run",
     "Not checked") — never "Done"."""
     findings = artifact.get("findings") or []
-    security = artifact.get("security") or {}
-    scanners = security.get("scanners") or []
-    totals = security.get("totals") or {}
     scope = artifact.get("scope") or {}
     rows: list[dict] = []
 
@@ -137,26 +129,15 @@ def review_checklist(artifact: dict) -> list[dict]:
         rows.append({"check": "Whole change read", "result": "Done",
                      "detail": f"{scope.get('files_changed', 0)} changed files reviewed"})
 
-    if not scanners:
-        rows.append({"check": "Security checks run", "result": "Not run",
-                     "detail": "secrets, static analysis and dependency scans did not run"})
-    else:
-        not_run = [sc.get("name") for sc in scanners if sc.get("status") != "ok"]
-        parts = []
-        for sc in scanners:
-            if sc.get("status") != "ok":
-                parts.append(f"{sc.get('name')}: not run")
-            elif sc.get("name") == "Trivy":
-                parts.append(f"Trivy: {totals.get('vulnerabilities', 0)} vulnerabilities ({totals.get('vulnerabilities_high', 0)} high+)")
-            else:
-                parts.append(f"{sc.get('name')}: {sc.get('findings', 0)} findings")
-        rows.append({"check": "Security checks run", "result": "Partial" if not_run else "Done", "detail": "; ".join(parts)})
-
+    # SECURITY AS THE REVIEWER SEES IT — what was judged in the code, by file and line.
+    # The scan itself (dependency vulnerabilities, secrets, the SBOM, the sign-off) is the
+    # SECURITY agent's report, and this checklist never speaks for it: two rows here used to
+    # be filled from a scanner pass this agent ran, which is why both pages showed an SBOM.
     blocking_security = [f for f in findings if f.get("category") == "security" and f.get("severity") in ("critical", "high")]
-    rows.append({"check": "Security issues resolved",
-                 "result": "Issues found" if blocking_security or (totals.get("secrets") or 0) > 0 else "No issues",
-                 "detail": (f"{len(blocking_security)} critical/high security finding(s)" if blocking_security else "no critical/high security finding")
-                 + (f"; {totals.get('secrets')} hardcoded secret(s)" if (totals.get("secrets") or 0) > 0 else "")})
+    rows.append({"check": "Security issues in the code", "result": "Issues found" if blocking_security else "None found",
+                 "detail": (f"{len(blocking_security)} critical/high security finding(s) in this review"
+                            if blocking_security
+                            else "no critical/high security finding in this review; the scan is the Security agent's")})
 
     coverage = artifact.get("requirements_coverage") or []
     if not coverage:
@@ -186,13 +167,27 @@ def review_checklist(artifact: dict) -> list[dict]:
     return rows
 
 
+def _coverage_fact(artifact: dict) -> str:
+    """"5 of 6 met" — or the honest "not checked" when the review recorded none."""
+    coverage = artifact.get("requirements_coverage") or []
+    if not coverage:
+        return "not checked"
+    met = sum(1 for c in coverage if (c.get("status") or "") == "satisfied")
+    return f"{met} of {len(coverage)} met"
+
+
+def _conformance_fact(artifact: dict) -> str:
+    conformance = artifact.get("design_conformance") or []
+    if not conformance:
+        return "not checked"
+    conforms = sum(1 for c in conformance if (c.get("status") or "") == "conforms")
+    return f"{conforms} of {len(conformance)} conform"
+
+
 def review_markdown(artifact: dict) -> str:
     ctx = artifact.get("context") or {}
     findings = sorted(artifact.get("findings") or [], key=lambda f: _SEV_ORDER.get(f.get("severity", "info"), 9))
-    security = artifact.get("security") or {}
-    scanners = security.get("scanners") or []
     scope = artifact.get("scope") or {}
-    ran = {sc.get("name"): sc.get("status") == "ok" for sc in scanners}
     blocks: list[str] = []
 
     # ── 01 summary ──
@@ -215,121 +210,6 @@ def review_markdown(artifact: dict) -> str:
         ))
     else:
         blocks.append("No issues were found in the reviewed code.")
-
-    # ── security checks ──
-    blocks.append("## Security checks")
-    if not security:
-        blocks.append("The security checks did not run for this target, so nothing about its security is established.")
-    else:
-        if artifact.get("security_summary"):
-            blocks.append(_demote(artifact["security_summary"]))
-        blocks.append("### Scanners")
-        rows = []
-        for sc in scanners:
-            ok = sc.get("status") == "ok"
-            # Passed = ran, found nothing; Failed = ran, found issues; Blocked = could not
-            # run (its note says why). Never "Skipped": that reads as a choice.
-            result = ("Passed" if not sc.get("findings") else "Failed") if ok else "Blocked"
-            note = sc.get("message") or (f"Ran in {sc.get('seconds')} s" if ok else sc.get("status"))
-            rows.append([sc.get("name"), sc.get("purpose"), result, sc.get("findings") if ok else "not run", note])
-        blocks.append(_table(["Scanner", "What it checks", "Result", "Findings", "Note"], rows))
-        not_run = [sc.get("name") for sc in scanners if sc.get("status") != "ok"]
-        if not_run:
-            blocks.append(
-                f"**Not established:** {', '.join(not_run)} did not run, so the areas they check are unknown — not clean."
-            )
-
-        vulns = sorted(security.get("vulnerabilities") or [], key=lambda v: _SEV_ORDER.get(v.get("severity"), 9))
-        via = {(c.get("name"), c.get("version")): c.get("via")
-               for c in (security.get("sbom") or {}).get("components") or []}
-        blocks.append("### Vulnerable dependencies")
-        if vulns:
-            grouped: dict[tuple, list[dict]] = {}
-            for v in vulns:
-                grouped.setdefault((v.get("package"), v.get("installed")), []).append(v)
-            rows = []
-            for (pkg, installed), items in sorted(
-                grouped.items(), key=lambda kv: (min(_SEV_ORDER.get(i.get("severity"), 9) for i in kv[1]), kv[0][0] or "")
-            ):
-                counts: dict[str, int] = {}
-                for i in items:
-                    counts[i.get("severity") or "unknown"] = counts.get(i.get("severity") or "unknown", 0) + 1
-                worst = min(counts, key=lambda k: _SEV_ORDER.get(k, 9))
-                breakdown = ", ".join(f"{n} {sev}" for sev, n in sorted(counts.items(), key=lambda kv: _SEV_ORDER.get(kv[0], 9)))
-                rows.append([
-                    pkg, installed, worst.title(), f"{len(items)} ({breakdown})",
-                    _upgrade_to([i.get("fixed", "") for i in items]) or "no fix released",
-                    via.get((pkg, installed)) or "direct dependency",
-                ])
-            blocks.append(_table(["Package", "Installed", "Severity", "Vulnerabilities", "Upgrade to", "Brought in by"], rows))
-            blocks.append("#### Vulnerability detail")
-            blocks.append(_table(
-                ["Vulnerability", "Severity", "Package", "Issue", "Fixed in"],
-                [[v.get("id"), (v.get("severity") or "").title(), f"{v.get('package')} {v.get('installed')}",
-                  _short_title(v.get("title", ""), v.get("package", "")), v.get("fixed") or "—"]
-                 for v in vulns[:_MAX_ROWS]],
-            ))
-            if len(vulns) > _MAX_ROWS:
-                blocks.append(f"{len(vulns) - _MAX_ROWS} further vulnerabilities are listed on the page's Security tab.")
-        else:
-            blocks.append(
-                "No known vulnerabilities were found in the dependencies." if ran.get("Trivy")
-                else "Dependencies were not checked for vulnerabilities — the scanner did not run."
-            )
-
-        secrets = security.get("secrets") or []
-        blocks.append("### Hardcoded secrets")
-        if secrets:
-            blocks.append(_table(
-                ["Rule", "Location", "Description"],
-                [[sec.get("rule"), _location(sec.get("file", ""), sec.get("line")), sec.get("description")] for sec in secrets[:_MAX_ROWS]],
-            ))
-            blocks.append("Secret values are redacted from this report. Rotate every exposed credential, then remove it from the code and its history.")
-        else:
-            blocks.append("No hardcoded secrets were detected." if ran.get("Gitleaks") else "Secrets were not scanned — the scanner did not run.")
-
-        sast = sorted(security.get("sast") or [], key=lambda f: _SEV_ORDER.get(f.get("severity"), 9))
-        blocks.append("### Static analysis")
-        if sast:
-            blocks.append(_table(
-                ["Severity", "Rule", "Location", "Message"],
-                [[(f.get("severity") or "").title(), (f.get("rule") or "").rsplit(".", 1)[-1],
-                  _location(f.get("file", ""), f.get("line")), f.get("message")] for f in sast[:_MAX_ROWS]],
-            ))
-        else:
-            blocks.append("Static analysis found no OWASP Top 10 issues." if ran.get("Semgrep") else "Static analysis did not run.")
-
-    # ── 04 SBOM ──
-    blocks.append("## Software bill of materials")
-    sbom = security.get("sbom") or {}
-    components = sbom.get("components") or []
-    if not components:
-        blocks.append("No dependency manifests were found on this branch." if security else "The SBOM was not built.")
-    else:
-        direct = [c for c in components if c.get("direct")]
-        transitive = [c for c in components if not c.get("direct")]
-        blocks.append(
-            f"{len(components)} components across {len(sbom.get('manifests') or [])} manifest(s): "
-            f"{len(direct)} declared directly, {len(transitive)} brought in by them."
-        )
-        for note in sbom.get("notes") or []:
-            blocks.append(f"> {note}")
-        blocks.append("### Direct dependencies")
-        blocks.append(_table(
-            ["Package", "Declared", "Version", "Licence", "Scope", "Vulnerabilities"],
-            [[c.get("name"), c.get("declared"), c.get("version"), c.get("license"), c.get("scope"),
-              "not checked" if c.get("vulnerabilities") is None else c.get("vulnerabilities")]
-             for c in direct[:_MAX_ROWS]],
-        ))
-        flagged = [c for c in transitive if c.get("vulnerabilities")]
-        if flagged:
-            blocks.append("### Vulnerable transitive packages")
-            blocks.append(_table(
-                ["Package", "Version", "Brought in by", "Scope", "Vulnerabilities"],
-                [[c.get("name"), c.get("version"), c.get("via"), c.get("scope"), c.get("vulnerabilities")] for c in flagged[:_MAX_ROWS]],
-            ))
-        if transitive:
-            blocks.append(f"The full list of {len(transitive)} transitive packages, with versions and licences, is on the page's SBOM tab.")
 
     # ── 05 requirements ──
     coverage = artifact.get("requirements_coverage") or []
@@ -370,10 +250,6 @@ def review_markdown(artifact: dict) -> str:
         items.append(f"**Changed files:** {scope.get('files_changed', 0)}; files read for context: {len(scope.get('files_read') or [])}")
     if scope.get("languages"):
         items.append("**Languages:** " + ", ".join(f"{k} ({v})" for k, v in scope["languages"].items()))
-    if scanners:
-        items.append("**Scanners:** " + "; ".join(
-            f"{sc.get('name')} ({'ran' if sc.get('status') == 'ok' else sc.get('status')})" for sc in scanners
-        ))
     documents = scope.get("documents") or []
     if documents:
         items.append("**Checked against:** " + "; ".join(
@@ -389,8 +265,8 @@ def review_markdown(artifact: dict) -> str:
     else:  # a review saved before documents were recorded — claim nothing it cannot show
         against = ""
     items.append(
-        f"**Method:** an AI reviewer read the code{against}; the security findings and SBOM "
-        "come from the scanners, not from the reviewer."
+        f"**Method:** an AI reviewer read the code{against}. Dependency vulnerabilities, "
+        "secrets, the SBOM and the security sign-off are the Security agent's report, not this one."
     )
     blocks.append(_bullets(items))
     return "\n\n".join(b for b in blocks if b)
@@ -420,8 +296,6 @@ def write_review_report(artifact: dict, out_dir: str) -> tuple[str, str]:
 
     ctx = artifact.get("context") or {}
     findings = artifact.get("findings") or []
-    security = artifact.get("security") or {}
-    totals = security.get("totals") or {}
     scope = artifact.get("scope") or {}
     verdict = artifact.get("merge_recommendation") or "needs_discussion"
     tail, _ = _target(ctx)
@@ -444,9 +318,8 @@ def write_review_report(artifact: dict, out_dir: str) -> tuple[str, str]:
         facts=[
             ("Verdict", _VERDICT.get(verdict, verdict)),
             ("Findings", f"{len(findings)} · {crit_high} critical/high"),
-            ("Vulnerabilities", f"{totals.get('vulnerabilities', 0)} · {totals.get('vulnerabilities_high', 0)} high+" if security else "not scanned"),
-            ("Secrets", str(totals.get("secrets", 0)) if security else "not scanned"),
-            ("SBOM", f"{totals.get('components', 0)} components" if security else "not built"),
+            ("Requirements", _coverage_fact(artifact)),
+            ("Design", _conformance_fact(artifact)),
             ("Scope", coverage),
         ],
         footer=f"{ctx.get('repo_name') or 'Repository'} · Code review report",

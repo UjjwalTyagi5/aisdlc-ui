@@ -89,74 +89,6 @@ export const ReviewFinding = z.object({
 });
 export type ReviewFinding = z.infer<typeof ReviewFinding>;
 
-const Scanner = z.object({
-  name: z.string(),
-  purpose: z.string().default(""),
-  status: z.string(),
-  findings: z.number().nullable().optional(),
-  seconds: z.number().nullable().optional(),
-  message: z.string().default(""),
-});
-
-const Vulnerability = z.object({
-  id: z.string().default(""),
-  severity: z.string().default("unknown"),
-  package: z.string().default(""),
-  installed: z.string().default(""),
-  fixed: z.string().default(""),
-  title: z.string().default(""),
-  manifest: z.string().default(""),
-});
-
-export const SbomComponent = z.object({
-  name: z.string(),
-  declared: z.string().default(""),
-  version: z.string().default(""),
-  license: z.string().default(""),
-  scope: z.string().default(""),
-  manifest: z.string().default(""),
-  ecosystem: z.string().default(""),
-  version_source: z.string().default(""),
-  direct: z.boolean().default(true),
-  via: z.string().default(""),
-  /** null = not checked (the vulnerability scanner did not run) — never read as 0. */
-  vulnerabilities: z.number().nullable().optional(),
-});
-export type SbomComponent = z.infer<typeof SbomComponent>;
-
-/** The scanners' output over the whole checkout — see backend code_security_scan.py. */
-export const SecurityScan = z.object({
-  scanned_at: z.string().default(""),
-  scanners: z.array(Scanner).default([]),
-  secrets: z
-    .array(z.object({ rule: z.string().default(""), description: z.string().default(""), file: z.string().default(""), line: z.number().default(0) }))
-    .default([]),
-  sast: z
-    .array(z.object({ rule: z.string().default(""), severity: z.string().default(""), message: z.string().default(""), file: z.string().default(""), line: z.number().default(0) }))
-    .default([]),
-  vulnerabilities: z.array(Vulnerability).default([]),
-  sbom: z
-    .object({
-      components: z.array(SbomComponent).default([]),
-      manifests: z.array(z.string()).default([]),
-      notes: z.array(z.string()).default([]),
-    })
-    .default({ components: [], manifests: [], notes: [] }),
-  totals: z
-    .object({
-      secrets: z.number().default(0),
-      sast: z.number().default(0),
-      vulnerabilities: z.number().default(0),
-      vulnerabilities_high: z.number().default(0),
-      components: z.number().default(0),
-      vulnerable_components: z.number().default(0),
-      scanners_failed: z.number().default(0),
-    })
-    .partial()
-    .default({}),
-});
-export type SecurityScan = z.infer<typeof SecurityScan>;
-
 export const ReviewScope = z
   .object({
     mode: z.string(),
@@ -210,11 +142,7 @@ export const CodeReviewArtifact = z.object({
   diff: z.string().default(""),
   status: z.string().default("reviewed"),
   scope: ReviewScope.default({}),
-  /** Absent (or with no scanners) for reviews saved before the security review existed —
-   *  which the page shows as "not run", never as clean. */
-  security: SecurityScan.optional(),
-  security_summary: z.string().default(""),
-  /** The Code Review & Security Report: its link, or why there is none. */
+  /** The Code Review Report: its link, or why there is none. */
   document: z
     /** `artifact_id` is the report's own document row — its approval status is read from
      *  it. Absent on reviews saved before 16 Sep 2026 (see reportDocumentFor). */

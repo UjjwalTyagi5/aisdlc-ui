@@ -483,6 +483,12 @@ async def lifespan(app: FastAPI):
     # None otherwise — decided in ONE place so this and artifact_store.get_blob_client
     # (the agents' path) cannot disagree about where documents live.
     app.state.blob_client = build_blob_client()
+    # ONE client, built on THIS loop. The agents' path would otherwise build a second
+    # one inside a graph node's throwaway `asyncio.run()` loop — see
+    # artifact_store.set_process_blob_client.
+    from shared.services.artifact_store import set_process_blob_client  # noqa: PLC0415
+
+    set_process_blob_client(app.state.blob_client)
 
     # Run the FIRST probe synchronously before yield so that the very first /health
     # request gets real probe results instead of "initializing" values.
@@ -1224,6 +1230,9 @@ from shared.routers.deployment_workspace import deployment_workspace_router
 app.include_router(deployment_workspace_router, prefix="/deployment", tags=["deployment-workspace"], dependencies=[_VIEW_DEP])
 from shared.routers.documentation_workspace import documentation_workspace_router
 app.include_router(documentation_workspace_router, prefix="/documentation", tags=["documentation-workspace"], dependencies=[_VIEW_DEP])
+# Test case suites: generate unit / functional / API cases as Excel, run them, file reports.
+from shared.routers.testing_suites import testing_suites_router
+app.include_router(testing_suites_router, prefix="/testing", tags=["testing-suites"], dependencies=[_VIEW_DEP])
 # Artifact publication (phase 2). Per-route gates: artifact:view to read, run:create to
 # snapshot, and require_stage_approval() — artifact:approve_<stage>, resolved from the
 # path — to publish or reject. No _VIEW_DEP blanket: the decision routes need the
