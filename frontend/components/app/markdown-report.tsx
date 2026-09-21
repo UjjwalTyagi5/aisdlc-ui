@@ -224,6 +224,7 @@ export function MarkdownReport({
   status,
   actions,
   facts: extraFacts = [],
+  kind: kindOverride,
   className,
 }: {
   markdown: string;
@@ -237,10 +238,15 @@ export function MarkdownReport({
   /** For the band's corner: Download Word, Raise for approval. */
   actions?: React.ReactNode;
   facts?: Fact[];
+  /** What the document is, when the caller knows better than its headings — an agent page
+   *  names its own documents (a code review report is not a "Requirements document"). Left
+   *  out, the kind is read from the headings, as the Requirements pages always have. */
+  kind?: Pick<DocumentKind, "eyebrow" | "label">;
   className?: string;
 }) {
   const doc = React.useMemo(() => parseDocument(markdown, filename), [markdown, filename]);
-  const title = doc.title ?? (project ? `${project} — ${doc.kind.label}` : titleFromFilename(filename) || doc.kind.label);
+  const kind = kindOverride ?? doc.kind;
+  const title = doc.title ?? (project ? `${project} — ${kind.label}` : titleFromFilename(filename) || kind.label);
   const when = generatedAt
     ? (Number.isNaN(Date.parse(generatedAt)) ? generatedAt : new Date(generatedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }))
     : undefined;
@@ -256,7 +262,7 @@ export function MarkdownReport({
     <article className={cn("mx-auto max-w-5xl space-y-8 p-4 md:p-6", className)}>
       <header className="space-y-3">
         <ReportHero
-          eyebrow={doc.kind.eyebrow}
+          eyebrow={kind.eyebrow}
           eyebrowTail={project}
           title={title}
           subtitle={leadOf(doc)}

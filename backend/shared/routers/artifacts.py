@@ -269,6 +269,162 @@ async def artifact_page(
     }
 
 
+async def _stored_bytes(blob_client, artifact) -> Optional[bytes]:
+    """The document's own bytes, from wherever they are right now: under the tenant's
+    `_pending` prefix until approval, at the final path after. None when neither holds them."""
+    from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+    if blob_client is None or not artifact.blob_path:
+        return None
+    locations = ([artifact.blob_path] if artifact.approval_status == "approved"
+                 else [pending_blob_path(artifact.blob_path), artifact.blob_path])
+    for location in locations:
+        try:
+            return await blob_client.download_bytes(location)
+        except Exception:  # noqa: BLE001 — try the other location, then report None
+            continue
+    return None
+
+
+@artifacts_router.get(
+    "/artifacts/{artifact_id}/preview",
+    dependencies=[Depends(require_permission("artifact:view"))],
+)
+async def artifact_preview(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Any document, as something the page can show in its centre — whatever the file is.
+
+    ONE VIEWER FOR EVERY AGENT. The Documents panel on each agent page lists what the agent
+    filed; opening a row showed the document on some pages, a file card on others, and a
+    spreadsheet on none. This answers by kind, with the same guards as `/page`:
+
+      sheets    an Excel workbook, as its sheets of rows (`sheet_preview.xlsx_sheets`)
+      markdown  a document: its page copy, or the text read back from its Word file
+                (`derived`, so a preview is never mistaken for the agent's own markdown)
+      …         and, only where there is neither, the file itself (`file_preview`): a
+                deck's slides, a CSV's rows, a markdown or HTML report, a PDF or an image
+      404       a format with no view (an archive, say), or a file missing from storage
+
+    Not gated on approval, like `/page`: reading a draft on screen is how its author
+    decides whether to raise it. A rejected document is 410 — its file has been deleted.
+    """
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+    if artifact.approval_status == "rejected":
+        raise HTTPException(status_code=410, detail="This document was rejected and its file has been deleted.")
+    if not artifact.blob_path or not is_blob_path(artifact.blob_path, str(request.state.tenant_id)):
+        raise HTTPException(status_code=404, detail="This document has no stored file to show.")
+
+    from shared.services.artifact_page import read_page_copy  # noqa: PLC0415
+    from shared.services.docx_preview import can_preview, docx_markdown  # noqa: PLC0415
+    from shared.services.sheet_preview import can_preview_sheet, xlsx_sheets  # noqa: PLC0415
+
+    blob_client = getattr(request.app.state, "blob_client", None)
+    filename = (artifact.blob_path or "").rsplit("/", 1)[-1]
+    base = {"artifactId": str(artifact.id), "filename": filename, "status": artifact.approval_status or "draft"}
+
+    # A WORKBOOK IS SHOWN AS ITSELF. Some have a page copy too (the Testing agent's reports
+    # do), but a person who opens a spreadsheet expects the spreadsheet.
+    if can_preview_sheet(filename):
+        data = await _stored_bytes(blob_client, artifact)
+        sheets = xlsx_sheets(data) if data else None
+        if sheets is None:
+            raise HTTPException(status_code=404, detail="This workbook's file could not be read. The file itself is unaffected.")
+        return {**base, "kind": "sheets", "sheets": sheets}
+
+    markdown = await read_page_copy(blob_client, artifact.blob_path, artifact.approval_status)
+    derived = False
+    if markdown is None and can_preview(filename):
+        data = await _stored_bytes(blob_client, artifact)
+        markdown = docx_markdown(data) if data else None
+        derived = markdown is not None
+    if markdown is not None:
+        return {**base, "kind": "markdown", "markdown": markdown, "derived": derived,
+                **({"derivedFrom": "word"} if derived else {})}
+
+    # NO PAGE COPY AND NOT A WORD FILE: the view is read from the file itself — a deck's
+    # slides, a CSV's rows, a markdown or HTML report, a PDF or an image (`file_preview`).
+    # Only ever here, where the answer used to be 404, so nothing that opened before changes.
+    from shared.services.file_preview import file_view, has_file_view, inline_type  # noqa: PLC0415
+
+    media_type = inline_type(filename)
+    if media_type is not None:
+        # The browser draws it; the page fetches the bytes from `/preview/file`.
+        return {**base, "kind": "file", "media": "pdf" if media_type == "application/pdf" else "image",
+                "contentType": media_type}
+    if not has_file_view(filename):
+        raise HTTPException(
+            status_code=404,
+            detail="This file has no page view: open it with the download. The file itself is unaffected.",
+        )
+    data = await _stored_bytes(blob_client, artifact)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This document's file could not be found in storage, so it cannot be shown.",
+        )
+    view = file_view(filename, data)
+    if view is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This file could not be read for the page: open it with the download. The file itself is unaffected.",
+        )
+    return {**base, **view}
+
+
+@artifacts_router.get(
+    "/artifacts/{artifact_id}/preview/file",
+    dependencies=[Depends(require_permission("artifact:view"))],
+)
+async def artifact_preview_file(
+    artifact_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """The bytes behind a `file` preview — a PDF or an image — for the page to draw in its centre.
+
+    Same guards and the same standing as `/preview`: reading a draft on screen is how its
+    author decides whether to raise it, so this is not gated on approval the way `/download`
+    (the project's record copy) is. It serves ONLY the formats `/preview` answers as `file`,
+    each with the media type named by its extension — never the stored content type — and
+    `nosniff`, so no other file can be served here to be rendered as something else.
+
+    An SVG can carry script. It is drawn with an <img>, which never runs it; opened directly,
+    the `sandbox` policy keeps it from running on the app's origin.
+    """
+    artifact, _run = await _get_artifact_or_404(db, artifact_id, request.state.tenant_id)
+    await _assert_project_visible(db, request, artifact.project_id)
+    if artifact.approval_status == "rejected":
+        raise HTTPException(status_code=410, detail="This document was rejected and its file has been deleted.")
+    if not artifact.blob_path or not is_blob_path(artifact.blob_path, str(request.state.tenant_id)):
+        raise HTTPException(status_code=404, detail="This document has no stored file to show.")
+
+    from shared.services.file_preview import inline_type  # noqa: PLC0415
+
+    filename = artifact.blob_path.rsplit("/", 1)[-1]
+    media_type = inline_type(filename)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Only PDFs and images are shown this way.")
+    data = await _stored_bytes(getattr(request.app.state, "blob_client", None), artifact)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This document's file could not be found in storage, so it cannot be shown.",
+        )
+    headers = {
+        # The leaf of the stored path, sanitised by artifact_store on the way in.
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    }
+    if media_type == "image/svg+xml":
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+    return Response(content=data, media_type=media_type, headers=headers)
+
+
 @artifacts_router.get("/artifacts/{artifact_id}/download")
 async def download_artifact(
     artifact_id: str,

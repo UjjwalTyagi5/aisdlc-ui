@@ -19,11 +19,13 @@ import { CodeViewer } from "@/components/app/code-viewer";
 import { DeployTargetDialog } from "@/components/app/deploy-target-dialog";
 import { DeploymentApprovals } from "@/components/app/deployment-approvals";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { ModelSelector } from "@/components/app/model-selector";
 import { Pill } from "@/components/app/report-primitives";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useDocumentView } from "@/hooks/use-open-document";
 import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
 import { listArtifacts } from "@/lib/api/artifacts";
@@ -94,6 +96,8 @@ export default function DeploymentPage() {
     queryFn: () => listArtifacts(id),
   });
   const approvals = useRaiseForApproval(id);
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(id);
 
   const chat = useAgentChat({
     openSessionId: linkedSession,
@@ -203,10 +207,15 @@ export default function DeploymentPage() {
           aria-label="Documents"
           className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
         >
-          <DocumentList projectId={id} stage="deployment" className="flex min-h-0 flex-1 flex-col" fillHeight />
+          <DocumentList projectId={id} stage="deployment" className="flex min-h-0 flex-1 flex-col" fillHeight selectedId={docView.openId} onSelect={docView.select} />
         </aside>
 
-        {!prepared ? (
+        {docView.openDoc ? (
+          <div className="flex min-h-0 flex-col overflow-hidden">
+            <DocumentPreview artifact={docView.openDoc} project={projectQ.data?.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Deployment" className="min-h-0 flex-1 overflow-auto" />
+          </div>
+        ) : !prepared ? (
           <div className="min-h-0 overflow-auto">
             <div className="mx-auto max-w-3xl px-4 py-12">
               <div className="mx-auto max-w-xl">

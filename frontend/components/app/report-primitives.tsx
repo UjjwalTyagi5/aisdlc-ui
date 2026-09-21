@@ -85,7 +85,7 @@ export function FactStrip({ facts, className }: { facts: Fact[]; className?: str
         const tone = FACT_TONE[f.tone ?? "default"];
         const Icon = f.icon;
         return (
-          <div key={f.label} className="bg-card flex items-start gap-3 rounded-xl border px-3.5 py-3">
+          <div key={f.label} className="bg-card flex min-w-0 items-start gap-3 rounded-xl border px-3.5 py-3">
             {Icon && (
               <span className={cn("mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg", tone.chip)}>
                 <Icon className="size-4" aria-hidden />
@@ -93,7 +93,9 @@ export function FactStrip({ facts, className }: { facts: Fact[]; className?: str
             )}
             <div className="min-w-0">
               <dt className="text-muted-foreground text-[10.5px] font-semibold tracking-wide uppercase">{f.label}</dt>
-              <dd className={cn("font-display text-base font-semibold tabular-nums", tone.value)}>{f.value}</dd>
+              {/* A long value (a file name) is cut to the card, whole on hover — it spilled out. */}
+              <dd className={cn("font-display truncate text-base font-semibold tabular-nums", tone.value)}
+                title={typeof f.value === "string" ? f.value : undefined}>{f.value}</dd>
               {f.hint && <dd className="text-muted-foreground text-[11px]">{f.hint}</dd>}
             </div>
           </div>

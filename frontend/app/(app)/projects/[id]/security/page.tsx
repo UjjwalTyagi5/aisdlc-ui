@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
@@ -40,6 +41,7 @@ import { ScanTargetDialog } from "@/components/app/scan-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useDocumentView } from "@/hooks/use-open-document";
 import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
 import { listArtifacts } from "@/lib/api/artifacts";
@@ -118,6 +120,8 @@ export default function SecurityPage() {
     queryFn: () => listArtifacts(id),
   });
   const approvals = useRaiseForApproval(id);
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(id);
 
   React.useEffect(() => {
     const newest = scansQ.data?.[0]?.id;
@@ -277,10 +281,18 @@ export default function SecurityPage() {
           aria-label="Documents"
           className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
         >
-          <DocumentList projectId={id} stage="security" className="flex min-h-0 flex-1 flex-col" fillHeight />
+          <DocumentList projectId={id} stage="security" className="flex min-h-0 flex-1 flex-col" fillHeight selectedId={docView.openId} onSelect={docView.select} />
         </aside>
 
-        <div className="flex min-h-0 flex-col overflow-hidden">
+        {/* AN OPEN DOCUMENT SITS OVER THE PAGE'S OWN VIEW, which stays mounted underneath —
+            closing it returns to exactly where the work was. */}
+        {docView.openDoc && (
+          <div className="flex min-h-0 flex-col overflow-hidden">
+            <DocumentPreview artifact={docView.openDoc} project={projectQ.data?.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Security" className="min-h-0 flex-1 overflow-auto" />
+          </div>
+        )}
+        <div className={cn("flex min-h-0 flex-col overflow-hidden", docView.openDoc && "hidden")}>
           {!prepared && !hasScan && !scansQ.isLoading ? (
             <div className="flex-1 overflow-auto">
               <div className="mx-auto max-w-xl px-4 py-12">
