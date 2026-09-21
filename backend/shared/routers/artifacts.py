@@ -452,16 +452,18 @@ async def download_artifact(
     artifact, run = await _get_artifact_or_404(db, artifact_id, tenant_id)
     await _assert_project_visible(db, request, artifact.project_id)
 
-    if getattr(artifact, "approval_status", "approved") != "approved":
-        # The bytes are under the tenant's `_pending` prefix, not at blob_path. Serving
-        # them would make the approval gate decorative — the whole point is that a
-        # document is not part of the project's record until somebody accepts it.
+    approved = getattr(artifact, "approval_status", "approved") == "approved"
+    if artifact.approval_status == "rejected":
         raise HTTPException(
             status_code=409,
-            detail="This artifact is still awaiting approval and cannot be downloaded yet."
-            if artifact.approval_status == "pending"
-            else "This artifact was rejected and its file has been deleted.",
+            detail="This artifact was rejected and its file has been deleted.",
         )
+    # A DRAFT OR PENDING DOCUMENT DOWNLOADS TOO (2026-09-21). This refused anything not
+    # yet approved, so the Word file or workbook an agent had just written could not be
+    # taken away to review or edit before raising it — the reason to download it at all.
+    # Its bytes are under the tenant's `_pending` prefix until approval moves them; what
+    # approval decides is whether the document joins the project's record, which the
+    # status, the move and the notices still carry.
 
     if not artifact.blob_path:
         # A row with no blob path predates blob storage, or was recorded by an agent
@@ -497,12 +499,22 @@ async def download_artifact(
             detail="Blob storage is not configured on this deployment",
         )
 
-    try:
-        data = await blob_client.download_bytes(artifact.blob_path)
-    except Exception as exc:  # noqa: BLE001
+    from shared.services.artifact_store import pending_blob_path  # noqa: PLC0415
+
+    # Not yet approved: the pending prefix first, then the final path (a document filed
+    # before the pending area existed). Approved: the final path only.
+    locations = [artifact.blob_path] if approved else [pending_blob_path(artifact.blob_path), artifact.blob_path]
+    data, failure = None, None
+    for location in locations:
+        try:
+            data = await blob_client.download_bytes(location)
+            break
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+    if data is None:
         # Type name only: an Azure error can carry a SAS token or the account URL.
         logger.warning(
-            "Artifact %s download failed: %s", artifact_id, type(exc).__name__
+            "Artifact %s download failed: %s", artifact_id, type(failure).__name__
         )
         raise HTTPException(status_code=502, detail="Artifact could not be retrieved")
 

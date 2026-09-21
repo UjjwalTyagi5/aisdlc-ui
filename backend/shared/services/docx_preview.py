@@ -23,6 +23,7 @@ Nothing here writes: no blob is added, no row is touched.
 """
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import re
@@ -31,9 +32,37 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-#: How much of a document we are willing to render on a page.
+#: How much of a document's TEXT we are willing to render on a page. Figures do not count.
 MAX_CHARS = 200_000
 _STYLE_HEADING = re.compile(r"^Heading (\d)$", re.IGNORECASE)
+
+#: A figure is carried into the page as a data URL — the formats a browser draws, up to a size
+#: a page can hold. Anything else (an EMF, a very large scan) is named, and stays in the file.
+MAX_FIGURE_BYTES = 4 * 1024 * 1024
+MAX_FIGURES_BYTES = 16 * 1024 * 1024
+_FIGURE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+_FIGURE_NOT_SHOWN = "_A figure here is only in the Word file._"
+
+
+def _figures(element: Any, document: Any, budget: list[int]) -> list[str]:
+    """The pictures inside a paragraph or table, in order, as markdown images.
+
+    DIAGRAMS WERE DROPPED. The Design agent's documents draw their C4, sequence and ER
+    diagrams as pictures (`WordCanvas.figure`), and a document read back without a page copy
+    lost every one of them — the reader kept text only, so the page showed the captions
+    ("Figure 3 · …") with nothing above them. `budget` is the bytes left for the document.
+    """
+    out = []
+    for rid in element.xpath(".//a:blip/@r:embed"):
+        part = document.part.related_parts.get(rid)
+        blob = getattr(part, "blob", None)
+        content_type = getattr(part, "content_type", "")
+        if not blob or content_type not in _FIGURE_TYPES or len(blob) > MAX_FIGURE_BYTES or len(blob) > budget[0]:
+            out.append(_FIGURE_NOT_SHOWN)
+            continue
+        budget[0] -= len(blob)
+        out.append(f"![Figure](data:{content_type};base64,{base64.b64encode(blob).decode('ascii')})")
+    return out
 
 
 def can_preview(filename: str) -> bool:
@@ -142,20 +171,33 @@ def docx_markdown(data: bytes) -> Optional[str]:
 
     body = _body_size(document)
     headings = _heading_sizes(document, body)
+    budget = [MAX_FIGURES_BYTES]
     blocks: list[str] = []
     for child in document.element.body.iterchildren():
         tag = child.tag.rsplit("}", 1)[-1]
         if tag == "p":
+            blocks.extend(_figures(child, document, budget))
             block = _paragraph(Paragraph(child, document), body, headings)
             if block and block != (blocks[-1] if blocks else None):
                 blocks.append(block)
         elif tag == "tbl":
             blocks.extend(_table(Table(child, document)))
+            blocks.extend(_figures(child, document, budget))
 
-    markdown = "\n\n".join(blocks).strip()
-    if not markdown:
-        return None
-    if len(markdown) > MAX_CHARS:
-        markdown = (markdown[:MAX_CHARS].rsplit("\n", 1)[0]
-                    + "\n\n_The rest of this document is in the Word file._")
-    return markdown
+    # The text limit counts text: a figure is one line of markdown and many bytes.
+    kept: list[str] = []
+    room = MAX_CHARS
+    for block in blocks:
+        if block.startswith("![Figure](data:"):
+            kept.append(block)
+            continue
+        if len(block) > room:
+            head = block[:room].rsplit("\n", 1)[0] if room > 0 else ""
+            if head.strip():
+                kept.append(head)
+            kept.append("_The rest of this document is in the Word file._")
+            break
+        kept.append(block)
+        room -= len(block) + 2
+    markdown = "\n\n".join(kept).strip()
+    return markdown or None

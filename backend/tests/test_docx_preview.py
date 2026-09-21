@@ -8,6 +8,7 @@ cell that python-docx repeats once per column it spans — 24 times.
 """
 from __future__ import annotations
 
+import base64
 import io
 import sys
 from pathlib import Path
@@ -103,3 +104,41 @@ def test_a_very_long_document_is_cut_and_says_so(monkeypatch):
 @pytest.mark.parametrize("name", ["architecture.docx", "ARCHITECTURE.DOCX"])
 def test_the_extension_check_ignores_case(name):
     assert can_preview(name)
+
+
+# ── figures ──────────────────────────────────────────────────────────────────
+# LIVE (2026-09-21): the Design agent's C4, sequence and ER diagrams are pictures in the Word
+# file (`WordCanvas.figure`), and a design read back without a page copy showed only their
+# captions — "Figure 3 · …" under nothing.
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+def _with_figure():
+    d = Document()
+    d.add_paragraph("Context")
+    d.add_picture(io.BytesIO(_PNG))
+    d.add_paragraph("Figure 1  ·  System context")
+    return d
+
+
+def test_a_diagram_comes_through_in_place_above_its_caption():
+    markdown = docx_markdown(_bytes(_with_figure()))
+    figure = "![Figure](data:image/png;base64," + base64.b64encode(_PNG).decode("ascii") + ")"
+    assert figure in markdown
+    assert markdown.index("Context") < markdown.index(figure) < markdown.index("Figure 1  ·  System context")
+
+
+def test_a_figure_past_the_page_budget_is_named_not_dropped(monkeypatch):
+    monkeypatch.setattr("shared.services.docx_preview.MAX_FIGURES_BYTES", 10)
+    markdown = docx_markdown(_bytes(_with_figure()))
+    assert "data:image" not in markdown
+    assert "_A figure here is only in the Word file._" in markdown
+
+
+def test_figures_do_not_count_against_the_text_limit(monkeypatch):
+    monkeypatch.setattr("shared.services.docx_preview.MAX_CHARS", 60)
+    markdown = docx_markdown(_bytes(_with_figure()))
+    assert "data:image/png" in markdown and "System context" in markdown

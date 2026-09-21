@@ -599,9 +599,9 @@ export function DocumentList({
 
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                   {/* `downloadUrl` IS the decision, not a hint. The backend sets it
-                      only when the document is approved AND its bytes actually landed,
-                      so re-deriving the condition here would be a second copy of the
-                      rule that could disagree with the first. */}
+                      when the document's bytes actually landed and it was not rejected
+                      — a draft included — so re-deriving the condition here would be a
+                      second copy of the rule that could disagree with the first. */}
                   {a.downloadUrl && (
                     <Button size="sm" variant="ghost" asChild>
                       <a href={a.downloadUrl} download>

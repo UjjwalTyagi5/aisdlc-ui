@@ -10,8 +10,14 @@
 import "@testing-library/jest-dom/vitest";
 
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+
+// The real renderer lazy-loads mermaid, which jsdom cannot lay out; what matters here is
+// that a diagram reaches it, with its source.
+vi.mock("@/components/app/mermaid-renderer", () => ({
+  MermaidRenderer: ({ source }: { source: string }) => <figure data-testid="mermaid">{source}</figure>,
+}));
 
 import { MarkdownReport, normaliseHeaders, parseDocument } from "@/components/app/markdown-report";
 
@@ -88,5 +94,44 @@ describe("MarkdownReport", () => {
   it("titles an untitled document by project and kind", () => {
     render(<MarkdownReport markdown={"## Executive Summary\nx\n## Project Scope\ny"} filename="brd_v3.docx" project="ClaimTrack" />);
     expect(screen.getByRole("heading", { level: 2, name: "ClaimTrack — Business requirements" })).toBeInTheDocument();
+  });
+
+  it("uses the caller's name for the document when it gives one", () => {
+    render(<MarkdownReport markdown={"## Summary\nReady."} project="QuickLink" kind={{ eyebrow: "Code review document", label: "Code review document" }} />);
+    expect(screen.getByRole("heading", { level: 2, name: "QuickLink — Code review document" })).toBeInTheDocument();
+    expect(screen.queryByText("Requirements document")).not.toBeInTheDocument();
+  });
+});
+
+// LIVE (2026-09-21): a Design document opened on the page showed its C4, sequence and ER
+// diagrams as mermaid source, while the Word file showed them as figures.
+describe("MarkdownReport — diagrams and figures", () => {
+  const DESIGN = [
+    "## C4 Architecture Diagrams",
+    "Level 1 — System Context",
+    "",
+    "```mermaid",
+    "graph TD",
+    "  A[\"CMS\"] --> B[\"API\"]",
+    "```",
+    "",
+    "## Data Model",
+    "```sql",
+    "CREATE TABLE links (id int);",
+    "```",
+  ].join("\n");
+
+  it("draws a mermaid block as a diagram, and leaves other code as code", () => {
+    render(<MarkdownReport markdown={DESIGN} filename="architecture.docx" />);
+    const diagram = screen.getByTestId("mermaid");
+    expect(diagram).toHaveTextContent('graph TD A["CMS"] --> B["API"]');
+    expect(screen.getByText("CREATE TABLE links (id int);").tagName).toBe("CODE");
+  });
+
+  it("shows a figure carried inside the document, and nothing else as a data URL", () => {
+    const png = "data:image/png;base64,iVBORw0KGgo=";
+    render(<MarkdownReport markdown={`## Context\n![Figure](${png})\n\n[click](data:text/html;base64,PHNjcmlwdD4=)`} />);
+    expect(screen.getByRole("img", { name: "Figure" })).toHaveAttribute("src", png);
+    expect(screen.getByText("click").getAttribute("href") ?? "").not.toContain("data:");
   });
 });

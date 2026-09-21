@@ -777,7 +777,6 @@ class ArtifactOut(BaseModel):
             "approved": "approved",
             "rejected": "rejected",
         }.get(_approval, "awaiting_approval")
-        _is_approved = _approval == "approved"
 
         is_blob = is_blob_path(stored_path, str(artifact.tenant_id))
         if is_blob:
@@ -785,12 +784,19 @@ class ArtifactOut(BaseModel):
             # failure by writing the row with blob_url = None while still recording
             # blob_path, so the path alone proves nothing. Offering a link anyway is how
             # the list ends up with a download icon that 404s.
-            # NO LINK BEFORE APPROVAL. A pending artifact's bytes sit under the tenant's
-            # `_pending` prefix, not at this path — offering a download would 404, and
-            # offering it at all would make the gate look decorative.
+            # A DRAFT IS DOWNLOADABLE TOO (2026-09-21). The link used to wait for approval,
+            # so an author could not take the Word file or workbook an agent had just
+            # written to review or edit it before raising it. The download route serves a
+            # draft or pending file from the tenant's `_pending` prefix; approval still
+            # decides what joins the project's record. A rejected file has been deleted.
+            #
+            # `blob_url` is written by approval, so for an undecided document the row
+            # cannot say whether its upload landed (see `StepOut` above): the link is
+            # offered, and the download route answers plainly if the bytes are missing.
+            undecided = _approval in ("draft", "pending")
             download_path = (
                 f"/api/artifacts/{artifact.id}/download"
-                if (artifact.blob_url and _is_approved)
+                if undecided or (artifact.blob_url and _approval == "approved")
                 else ""
             )
         elif stored_path:
@@ -843,12 +849,10 @@ class ArtifactOut(BaseModel):
                 "filename": filename,
                 "contentType": artifact.content_type or None,
                 "sizeBytes": artifact.size_bytes,
-                # Whether there is a file to fetch RIGHT NOW. False while pending —
-                # the bytes exist but under the pending prefix, and nobody has agreed
-                # they belong to the project yet — and false when an approved
-                # artifact's upload failed. `awaitingApproval` separates those two, so
-                # the card can say "waiting for sign-off" rather than "not stored",
-                # which would read as a fault.
+                # Whether there is a file to fetch RIGHT NOW: its bytes landed and it was
+                # not rejected — a draft or pending file is fetched from the pending
+                # prefix. False when the upload failed, which the card says as "not
+                # stored"; `awaitingApproval` and `rejected` carry the approval standing.
                 "stored": bool(download_path),
                 "awaitingApproval": _approval == "pending",
                 "rejected": _approval == "rejected",

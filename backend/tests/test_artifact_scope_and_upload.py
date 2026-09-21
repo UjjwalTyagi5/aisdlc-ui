@@ -120,9 +120,10 @@ async def test_a_project_level_document_has_no_stage(org_project):
     assert r.json()["stage"] is None
 
 
-async def test_an_upload_is_pending_and_not_downloadable(org_project):
-    """THE RULE THAT MAKES APPROVAL MEAN SOMETHING. One status for generated and
-    uploaded documents alike; two would make 'approved' ambiguous on one screen."""
+async def test_an_upload_is_pending_and_still_downloadable(org_project):
+    """One status for generated and uploaded documents alike; two would make 'approved'
+    ambiguous on one screen. Pending is not hidden, though (2026-09-21): the file is
+    served from the pending area, so it can be reviewed before anyone decides."""
     t = org_project
     _, hdr = await _member(t, "ba", ["run:create", "artifact:view"])
     with TestClient(process_api.app) as c:
@@ -130,10 +131,10 @@ async def test_an_upload_is_pending_and_not_downloadable(org_project):
         body = r.json()
         assert body["status"] == "awaiting_approval"
         assert body["approvedBy"] is None and body["approvedAt"] is None
-        # The bytes are in the pending area, so there is nothing to fetch yet.
         assert body["body"]["awaitingApproval"] is True
+        assert body["downloadUrl"] == f"/api/artifacts/{body['id']}/download"
         dl = c.get(f"/artifacts/{body['id']}/download", headers=hdr)
-    assert dl.status_code != 200, "a pending document must not be downloadable"
+    assert dl.status_code == 200 and dl.content, "a pending document downloads from the pending area"
 
 
 async def test_the_uploader_is_recorded_apart_from_the_approver(org_project):
