@@ -12,9 +12,13 @@ is `run:create` and not `approve`.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 
 async def may_raise_for_approval(
@@ -118,4 +122,109 @@ async def submit_for_approval(
     )
     await db.flush()
     await db.refresh(artifact)
+    await notify_submitted(db, artifact, tenant_id=tenant_id, actor_id=actor_id)
     return True
+
+
+def _agent_href(project_id, stage: Optional[str]) -> str:
+    """The screen the document lives on: its agent's page, or the project for a
+    project-wide document. Backend stage `code_review` is the route `code-review`."""
+    base = f"/projects/{project_id}"
+    return f"{base}/{stage.replace('_', '-')}" if stage else base
+
+
+async def _describe(db: AsyncSession, artifact, tenant_id: str) -> tuple[str, str, str]:
+    """(document name, project name, stage label) for a notification's wording."""
+    name = (artifact.blob_path or "").rsplit("/", 1)[-1] or "document"
+    project_name = (await db.execute(
+        text("SELECT display_name FROM projects WHERE id = CAST(:p AS uuid)"),
+        {"p": str(artifact.project_id)},
+    )).scalar() or "the project"
+    stage = (artifact.stage or "").replace("_", " ").strip() or "project-wide"
+    return name, project_name, stage
+
+
+async def _label(db: AsyncSession, tenant_id: str, user_id: Optional[str]) -> str:
+    from shared.services.actor_labels import actor_labels, relabel  # noqa: PLC0415
+
+    if not user_id:
+        return "Someone"
+    labels = await actor_labels(db, tenant_id, [user_id])
+    return relabel(user_id, labels) or "Someone"
+
+
+async def notify_submitted(
+    db: AsyncSession, artifact, *, tenant_id: str, actor_id: Optional[str]
+) -> None:
+    """Tell the project's administrators a document is waiting for them.
+
+    The Requests & Approvals queue already lists it; this puts it in the bell too.
+    Best-effort: `notifications.emit` never raises, and this must never fail the
+    submission it announces.
+    """
+    from shared.services import notifications  # noqa: PLC0415
+
+    try:
+        name, project_name, stage = await _describe(db, artifact, tenant_id)
+        who = await _label(db, tenant_id, actor_id)
+        await notifications.emit(
+            db,
+            tenant_id=str(tenant_id),
+            kind="document_approval_required",
+            title=f"{name} is awaiting your approval",
+            body=f"{who} sent the {stage} document for approval on {project_name}.",
+            href=_agent_href(artifact.project_id, artifact.stage),
+            recipient_role="project_admin",
+            recipient_scope_kind="project",
+            recipient_scope_id=str(artifact.project_id),
+            project_id=str(artifact.project_id),
+            run_id=str(artifact.run_id) if artifact.run_id else None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("approval-required notice failed for %s", artifact.id, exc_info=True)
+
+
+async def notify_decided(
+    db: AsyncSession, artifact, *, tenant_id: str, decision: str, decided_by: Optional[str],
+) -> None:
+    """Tell whoever put the document forward that it was approved or rejected.
+
+    The submitter is read from the audit trail (`artifact_submit`), because nothing on
+    the artifact records who pressed the button; `uploaded_by` is the fallback for a
+    document that predates that event. Nobody is told about their own decision.
+    """
+    from shared.models.orm import AuditEvent  # noqa: PLC0415
+    from shared.services import notifications  # noqa: PLC0415
+
+    try:
+        submitter = (await db.execute(
+            select(AuditEvent.actor_id)
+            .where(
+                AuditEvent.event_type == "artifact_submit",
+                AuditEvent.resource_id == str(artifact.id),
+            )
+            .order_by(AuditEvent.created_at.desc())
+            .limit(1)
+        )).scalar() or artifact.uploaded_by
+        if not submitter or str(submitter) == str(decided_by or ""):
+            return
+
+        name, project_name, stage = await _describe(db, artifact, tenant_id)
+        who = await _label(db, tenant_id, decided_by)
+        approved = decision == "approved"
+        body = f"{who} {'approved' if approved else 'rejected'} the {stage} document on {project_name}."
+        if not approved and getattr(artifact, "rejection_reason", None):
+            body += f" Reason: {artifact.rejection_reason}"
+        await notifications.emit(
+            db,
+            tenant_id=str(tenant_id),
+            kind="document_approved" if approved else "document_rejected",
+            title=f"{name} was {'approved' if approved else 'rejected'}",
+            body=body,
+            href=_agent_href(artifact.project_id, artifact.stage),
+            recipient_user_id=str(submitter),
+            project_id=str(artifact.project_id),
+            run_id=str(artifact.run_id) if artifact.run_id else None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("decision notice failed for %s", artifact.id, exc_info=True)

@@ -135,7 +135,7 @@ def render_test_cases_docx(test_cases: Iterable[Any], path: str, *, meta: TestDo
             ("Project", meta.project),
             ("Derived from", meta.source.split(":", 1)[-1].strip() if ":" in meta.source else meta.source),
             ("Test types", kinds),
-            ("Generated", meta.generated_on),
+            ("Date", meta.generated_on),
         ],
         footer=f"{meta.title} · Test case document",
     )

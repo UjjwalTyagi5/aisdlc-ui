@@ -28,7 +28,7 @@ def suite_markdown(meta: SuiteMeta, cases: list[Any]) -> str:
     about = [
         f"- **Branch:** {meta.branch or '—'}" + (f" (commit {meta.commit[:7]})" if meta.commit else ""),
         f"- **Derived from:** {meta.sources or '—'}",
-        f"- **Generated:** {meta.generated_at or '—'}",
+        f"- **Date:** {meta.generated_at or '—'}",
         f"- **Cases:** {len(cases)}",
     ]
     if meta.app_notes:

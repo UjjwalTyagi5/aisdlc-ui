@@ -622,6 +622,12 @@ async def approve_artifact(
     # every subsequent statement in the request sees zero rows; `db.refresh()` then
     # failed outright with "Could not refresh instance". The dependency's commit
     # persists both the artifact and the audit event.
+    from shared.services.artifact_approval import notify_decided  # noqa: PLC0415
+
+    await notify_decided(
+        db, artifact, tenant_id=request.state.tenant_id, decision="approved",
+        decided_by=artifact.approved_by,
+    )
     logger.info("Artifact %s approved by %s", artifact_id, artifact.approved_by)
     return (await _with_actor_emails(
         db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
@@ -702,6 +708,12 @@ async def reject_artifact(
         )
     )
     # See approve_artifact: the request-scoped dependency owns the commit.
+    from shared.services.artifact_approval import notify_decided  # noqa: PLC0415
+
+    await notify_decided(
+        db, artifact, tenant_id=request.state.tenant_id, decision="rejected",
+        decided_by=artifact.approved_by,
+    )
     logger.info("Artifact %s rejected by %s", artifact_id, artifact.approved_by)
     return (await _with_actor_emails(
         db, request.state.tenant_id, [ArtifactOut.from_orm_artifact(artifact)]))[0]
