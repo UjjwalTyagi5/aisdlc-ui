@@ -53,7 +53,7 @@ CASE_COLUMNS: dict[str, list[tuple[str, str, int]]] = {
 STEP_COLUMNS = [("Case ID", 10), ("Step", 6), ("Action", 16), ("Target", 36), ("Value", 36)]
 _ABOUT_ROWS = [("Test type", "kind"), ("Project", "project"), ("Source project", "source_project"),
                ("Repository", "repository"), ("Branch", "branch"),
-               ("Commit", "commit"), ("Generated", "generated_at"), ("Derived from", "sources"),
+               ("Commit", "commit"), ("Date", "generated_at"), ("Derived from", "sources"),
                ("Application notes", "app_notes")]
 
 
