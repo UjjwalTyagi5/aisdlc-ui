@@ -16,6 +16,7 @@ import { DocumentCard } from "@/components/app/document-card";
 import { DocumentReportView } from "@/components/app/document-report-view";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { ModelSelector } from "@/components/app/model-selector";
+import { TechStackChip } from "@/components/app/tech-stack-chip";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { DocumentList } from "@/components/app/document-list";
@@ -244,6 +245,7 @@ export default function DesignPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <TechStackChip projectId={projectId} />
             <ModelSelector
               aria-label="Design agent model"
               projectId={projectId}
