@@ -96,6 +96,7 @@ def test_the_prompt_block_lists_the_stack_and_the_rules():
     assert '"Node + Next.js" (the Business Unit default)' in block
     assert "- Backend frameworks: Node.js, Express" in block and "Prefer managed services." in block
     assert NOT_COVERED in block
+    assert "Versions are not part of the list" in block     # the marker once landed in the Version column
     assert render_for_prompt(None) == "" and render_for_prompt(EffectiveTechStack(None, "none")) == ""
 
 
@@ -105,6 +106,21 @@ def test_the_table_check_reads_only_the_technology_stack_section():
     bad = TABLE.replace("| PostgreSQL | 16 |", "| MongoDB | 7 |")
     assert check_stack_table(eff, bad) == [StackViolation(layer="Database", technology="MongoDB")]
     assert check_stack_table(EffectiveTechStack(None, "none"), bad) == []
+
+
+def test_only_the_stack_table_is_read_not_the_environments_table_under_it():
+    """LIVE (2026-09-22): the section also holds an Environment | Description table; reading on
+    into it flagged "Description" and every environment as outside the stack, and cost a
+    needless correction call."""
+    eff = EffectiveTechStack(NODE, "bu_default")
+    section = TABLE.split("## SECURITY")[0] + (
+        "\n### Deployment Architecture\n\n| Environment | Description |\n|---|---|\n"
+        "| Development | ⚠️ [ASSUMPTION] — not specified in requirements. |\n| Production | Azure App Service |\n")
+    assert check_stack_table(eff, section) == []
+    # A table with no blank line before the next one is still just the first table's rows.
+    tight = ("## TECHNOLOGY STACK\n| Layer | Technology |\n|---|---|\n| Database | MongoDB |\n"
+             "Environment | Description\n--- | ---\nDevelopment | local\n")
+    assert check_stack_table(eff, tight) == [StackViolation(layer="Database", technology="MongoDB")]
 
 
 def test_short_names_match_whole_words_only():

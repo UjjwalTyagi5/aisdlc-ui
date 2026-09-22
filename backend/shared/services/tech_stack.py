@@ -156,8 +156,11 @@ def render_for_prompt(eff: Optional[EffectiveTechStack]) -> str:
         "Rules:",
         "1. Every technology you name — the technology stack table, C4 containers, low-level design, "
         "database schema, API contracts, ADRs and deployment — must come from this list.",
-        f'2. Where the list does not cover a need, write "{NOT_COVERED}" instead of choosing another technology.',
-        "3. Do not recommend alternatives from outside this list.",
+        f'2. Where the list does not cover something the design needs (a cache, an identity provider), write '
+        f'"{NOT_COVERED}" in place of the technology — never choose one from outside the list.',
+        # LIVE (2026-09-22): without this the marker was also written into the Version column.
+        "3. Versions are not part of the list: give the version you recommend for each listed technology.",
+        "4. Do not recommend alternatives from outside this list.",
     ]
     return "\n".join(lines)
 
@@ -200,6 +203,10 @@ def check_stack_table(eff: Optional[EffectiveTechStack], markdown: str) -> list[
     for line in markdown[span[0]:span[1]].splitlines():
         row = line.strip()
         if not row.startswith("|"):
+            # The stack table ends at its first non-table line. The section goes on to hold
+            # other tables (Environment | Description) whose cells are not technologies.
+            if tech_idx is not None:
+                break
             continue
         cells = [c.strip() for c in row.strip("|").split("|")]
         if tech_idx is None:
