@@ -748,10 +748,11 @@ async def cost_plan(schedule_json: str, rates_json: str) -> str:
 
 _SHARED_TOOLS: List[Any] = []
 try:  # pragma: no cover - import guard only
-    from agents_orchestrator.design_architecture_agent.agents.architecture import (
-        export_document,
-        generate_diagram,
-    )
+    from agents_orchestrator.design_architecture_agent.agents.architecture import generate_diagram
+    # THE PROJECT MANAGER'S OWN EXPORT. The Design agent's filed every document under
+    # `design`: an estimate exported here landed in Design's Documents and never on the
+    # Plan page or in anybody's approvals. See pm_agent/plan_documents.
+    from agents_orchestrator.pm_agent.plan_documents import export_document
 
     _SHARED_TOOLS = [export_document, generate_diagram]
 except Exception:  # noqa: BLE001
@@ -768,16 +769,14 @@ try:
 except Exception:  # noqa: BLE001
     _DOCUMENT_TOOLS = []
 
-try:
-    from shared.tools.sharepoint_artifacts import make_sharepoint_tools  # noqa: PLC0415
+# CONNECTOR TOOLS ARE NOT LISTED HERE ANY MORE. They are resolved per run from what
+# this project granted THIS stage — see shared/tools/stage_tools. A literal list here
+# was the defect: the "Tools per stage" picker could grant a connector the agent had no
+# tool for, and this agent told a user it could only publish to SharePoint while
+# Confluence sat granted and read-write in that project's settings.
+from shared.tools.stage_tools import tools_for_stage  # noqa: E402
+from shared.tools.document_approval import make_approval_tools  # noqa: E402
 
-    # Publishes APPROVED documents only, and cannot delete anything from the library —
-    # see shared/tools/sharepoint_artifacts. `agent_id` and `stage` are bound here and
-    # never taken from a tool argument, or a prompt could claim another agent's grant.
-    _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="plan", stage="plan")
-except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
-    _SHAREPOINT_TOOLS = []
-    logger.warning("PM agent: project document tools unavailable")
 
 try:
     from shared.tools.project_team import make_team_tools  # noqa: PLC0415
@@ -806,8 +805,9 @@ tools = [
     save_plan,
     *_SHARED_TOOLS,
     *_DOCUMENT_TOOLS,
-    *_SHAREPOINT_TOOLS,
     *_TEAM_TOOLS,
+    # An exported document is a DRAFT; this is the Documents panel's "Raise for approval".
+    *make_approval_tools("plan"),
 ]
 
 
@@ -953,6 +953,14 @@ roles cost; do not assume a day rate. Effort with no matching rate comes back as
 uncosted, and that is the honest answer — a total built on an invented rate is a number
 somebody will put in front of a client.
 
+── DOCUMENTS AND APPROVAL ────────────────────────────────────────────────────
+`export_document` writes a document (an effort estimate, a plan, a report) as Word and
+files it in this project's Plan documents as a DRAFT. Say exactly that. When the user asks
+to send, submit or raise it for approval, call `raise_document_for_approval` with the file
+name `export_document` returned — in the same turn as the export when both were asked for.
+Raising is not approving: the approver decides in Requests & Approvals. Never export a
+document again just because the user asked to send it.
+
 ── SAVING ────────────────────────────────────────────────────────────────────
 Call `save_plan` when the user is satisfied. The plan is recorded as AWAITING APPROVAL:
 a project admin decides whether it becomes the project's committed plan. Tell the user
@@ -1052,7 +1060,10 @@ async def agent(state: AgentState):
         )
         # Bound HERE, not in the cached builder, so per-run MCP tools never leak across
         # runs through the shared orchestrator cache.
-        orch = orch.bind_tools(tools + get_mcp_tools())
+        # Connector tools alongside the MCP ones, resolved per run for the same
+        # reason: what this project granted this stage can change between runs,
+        # and a cached binding would serve a stale answer.
+        orch = orch.bind_tools(tools + get_mcp_tools() + await tools_for_stage("plan", "plan"))
         response = await guarded_completion(
             resolved, orch, clean, tenant_id=tenant_id, agent_type="plan",
             config={"metadata": {"user_api_key_alias": resolved.alias}},
@@ -1069,7 +1080,10 @@ async def agent(state: AgentState):
 async def action(state: AgentState):
     last = state["messages"][-1]
     results = []
-    available = {t.name: t for t in tools + get_mcp_tools()}
+    available = {
+        t.name: t
+        for t in tools + get_mcp_tools() + await tools_for_stage("plan", "plan")
+    }
     for tc in getattr(last, "tool_calls", []) or []:
         try:
             fn = available.get(tc["name"])

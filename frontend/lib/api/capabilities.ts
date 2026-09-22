@@ -2,7 +2,11 @@ import { z } from "zod";
 
 import type { Phase, ProjectId } from "@/lib/schemas";
 import { ProjectCapabilities, CuratedToggleResult } from "@/lib/schemas/capabilities";
-import { AgentAccessOverride, type AgentAccessOverrideInput } from "@/lib/schemas/agent-access";
+import {
+  AgentAccessOverride,
+  type AgentAccessOverrideInput,
+  MyAgentAccess,
+} from "@/lib/schemas/agent-access";
 
 import { api } from "./client";
 
@@ -42,4 +46,12 @@ export const removeAgentAccessOverride = (id: ProjectId, role: string, phase: Ph
   api(`/projects/${encodeURIComponent(id)}/agent-access-overrides`, {
     method: "DELETE",
     query: { role, phase },
+  });
+
+/** Which agents the CALLER reaches on this project, as the API will decide it
+ *  (person override → their extra agents → role override → default). The single
+ *  source the project page and each agent page render their padlocks from. */
+export const getMyAgentAccess = (id: ProjectId) =>
+  api(`/projects/${encodeURIComponent(id)}/agent-access/me`, {
+    schema: MyAgentAccess,
   });

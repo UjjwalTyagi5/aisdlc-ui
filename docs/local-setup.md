@@ -195,6 +195,24 @@ The first boot creates the single organization. Boot is also where two guards ru
 [Troubleshooting](#troubleshooting) if it refuses to start; both failures are the guards
 doing their job, not bugs.
 
+### Where generated documents go
+
+Every document an agent generates (a BRD, a design, a QA report) is stored as bytes and
+referenced from an `artifacts` row. Two backends, chosen in `shared/storage/__init__.py`:
+
+| `backend/.env`                              | Storage                                  |
+|---------------------------------------------|------------------------------------------|
+| `AZURE_BLOB_ACCOUNT_URL` set                | Azure Blob Storage (the deployed setup)  |
+| blank, and `ARTIFACT_STORAGE_ROOT` set      | a directory on this machine              |
+| both blank                                  | nothing — rows record `blob_url = None`  |
+
+For local work set `ARTIFACT_STORAGE_ROOT=files/artifact-store`. The full lifecycle —
+approval, download, the agents' `read_document`, publishing to SharePoint or Confluence
+— works against it; only evidence export (which mints Azure SAS links) answers 503.
+Azure wins when both are set. The two are not synchronised: a document stored on disk
+stays on disk when you point the backend back at Azure, and vice versa — a row whose
+bytes live in the other backend downloads as "could not be retrieved".
+
 ## 5. Seed the dev data
 
 Once the backend has booted at least once (that is what creates the organization the

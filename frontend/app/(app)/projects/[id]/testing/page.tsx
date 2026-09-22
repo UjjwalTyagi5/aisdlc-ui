@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useParams } from "next/navigation";
+import { usePathname, useParams, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -12,11 +12,13 @@ import {
   FlaskConical,
   GitBranch,
   GitPullRequest,
+  History,
   Loader2,
   MessageSquare,
   Play,
+  ListChecks,
   ScrollText,
-  Settings2,
+  SlidersHorizontal,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -28,15 +30,24 @@ import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
+import { MarkdownMessage } from "@/components/app/markdown-message";
 import { ModelSelector } from "@/components/app/model-selector";
 import { TestTargetDialog, type TestTarget } from "@/components/app/test-target-dialog";
+import { TestRunReport } from "@/components/app/test-run-report";
 import { RequireRole } from "@/components/auth/require-role";
+import { SuiteHistory } from "@/components/app/testing/suite-history";
+import { TestSuitesWorkflow } from "@/components/app/testing/test-suites-workflow";
+import { useDocumentView } from "@/hooks/use-open-document";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
+import { listArtifacts } from "@/lib/api/artifacts";
+import { entryTarget, getHistoryEntry, suitesKeys } from "@/lib/api/testing-suites";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import { getProject } from "@/lib/api/projects";
-import { getUnitResult, openTestsPr, type UnitResult } from "@/lib/api/testing";
+import { getRunReport, getUnitResult, openTestsPr, type UnitResult } from "@/lib/api/testing";
 import { qk } from "@/lib/api/query-keys";
 import type { ProjectId } from "@/lib/schemas";
 
@@ -105,6 +116,8 @@ const TEST_TYPES: TType[] = [
 ];
 
 type Tab = "qa" | "output";
+/** The page's modes: the test case flow, what it did before, and the individual test types it grew from. */
+type Mode = "suites" | "history" | "advanced";
 
 export default function TestingPage() {
   const params = useParams<{ id: string }>();
@@ -119,7 +132,7 @@ export default function TestingPage() {
   // A `?session=` link from the project overview opens the drawer on that
   // conversation rather than a blank one.
   const linkedSession = useChatDeepLink(setChatOpen);
-  const [panelOpen, setPanelOpen] = React.useState(true);
+  const [mode, setMode] = React.useState<Mode>("suites");
   const [selectedType, setSelectedType] = React.useState<string>("unit");
   const [cfg, setCfg] = React.useState<Record<string, Record<string, string>>>({});
   const [tab, setTab] = React.useState<Tab>("output");
@@ -128,6 +141,51 @@ export default function TestingPage() {
   const [agentModel, setAgentModel] = React.useState<string>();
 
   const queryClient = useQueryClient();
+  // The project's documents — the SAME query the Documents panel reads, so a suite raised or
+  // approved anywhere updates its card in the flow too.
+  const documentsQ = useQuery({ queryKey: qk.artifacts.forProject(id), queryFn: () => listArtifacts(id) });
+  const approvals = useRaiseForApproval(id);
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(id);
+
+  // THE PAGE OPENS EMPTY. The work on it is named in the address (`?history=`) — a generation
+  // started here, or an entry opened from History — so a reload or a shared link keeps it,
+  // and arriving without one never pours in whatever ran last.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const entryId = searchParams.get("history");
+  const setEntryId = React.useCallback((next: string | null) => {
+    const qs = new URLSearchParams(searchParams.toString());
+    if (next) qs.set("history", next); else qs.delete("history");
+    const q = qs.toString();
+    router.replace(`${pathname}${q ? `?${q}` : ""}`, { scroll: false });
+  }, [pathname, router, searchParams]);
+  const entryQ = useQuery({
+    queryKey: suitesKeys.entry(id, entryId ?? ""),
+    queryFn: () => getHistoryEntry(id, entryId!),
+    enabled: !!entryId,
+    refetchInterval: (q) => (q.state.data?.active ? 2000 : false),
+  });
+  const entry = entryId ? entryQ.data ?? null : null;
+  // An opened entry brings its branch with it — once per entry, so a branch picked afterwards stands.
+  const hydratedFor = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!entry || hydratedFor.current === entry.id) return;
+    hydratedFor.current = entry.id;
+    const t = entryTarget(entry);
+    if (t) setTarget({ ado_project: t.ado_project, repo: t.repo, branch: t.branch });
+  }, [entry]);
+  const pickTarget = (t: TestTarget) => {
+    setTarget(t);
+    // A different branch is different work: the page starts over for it.
+    const open = entryTarget(entry);
+    if (open && (open.ado_project !== t.ado_project || open.repo !== t.repo || open.branch !== t.branch)) {
+      hydratedFor.current = null;
+      setEntryId(null);
+    }
+  };
+
   const chat = useAgentChat({
     openSessionId: linkedSession,
     agent: "testing",
@@ -163,6 +221,16 @@ export default function TestingPage() {
     enabled: !!ranSession && !!chat.sessionId && ranType === "unit",
     refetchInterval: chat.busy ? 4000 : false,
   });
+  // THE RUN'S REPORT — the numbers the run wrote (`run_report.json`), rendered as a
+  // report in the Output pane. The agent's prose used to be all the pane showed:
+  // `##` and `**` on screen, and "did it pass" somewhere in paragraph six.
+  const reportQ = useQuery({
+    queryKey: qk.testing.runReport(id, chat.sessionId ?? ""),
+    queryFn: () => getRunReport(id, chat.sessionId ?? ""),
+    enabled: !!ranSession && !!chat.sessionId,
+    refetchInterval: (q) => (chat.busy || !q.state.data?.available ? 4000 : false),
+  });
+  const report = !chat.busy && reportQ.data?.available ? (reportQ.data.report ?? null) : null;
   const prMut = useMutation({
     mutationFn: () => openTestsPr(id, chat.sessionId ?? ""),
     onSuccess: () => { toast.success("Tests PR opened"); void unitQ.refetch(); },
@@ -235,7 +303,7 @@ export default function TestingPage() {
                   <span className="font-mono">{target.branch}</span>
                 </span>
               ) : (
-                <span>Generate &amp; run tests of any type against a branch.</span>
+                <span>Generate test cases, get them approved, and run them against a branch and the running app.</span>
               )}
             </p>
           </div>
@@ -250,10 +318,6 @@ export default function TestingPage() {
               <GitBranch className="size-4" aria-hidden />
               Select target
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setPanelOpen((o) => !o)}>
-              <Settings2 className="size-4" aria-hidden />
-              New test run
-            </Button>
             <Button variant="outline" size="sm" onClick={() => setChatOpen(true)}>
               <MessageSquare className="size-4" aria-hidden />
               Chat
@@ -262,21 +326,66 @@ export default function TestingPage() {
         </div>
       </div>
 
-      <div className={cn("grid min-h-0 flex-1 overflow-hidden",
-        panelOpen ? "md:grid-cols-[360px_1fr]" : "grid-cols-1")}>
-        {/* Left config rail */}
-        {panelOpen && (
-          <aside className="min-h-0 overflow-auto border-b md:border-b-0 md:border-r">
-          <StageVersionPanel
-            projectId={id}
-            phase="testing"
-            className="mb-3 shrink-0"
-          />
-          <DocumentList
-            projectId={id}
-            stage="testing"
-            className="mb-4 shrink-0"
-          />
+      <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[320px_1fr]">
+        {/* THE DOCUMENTS BESIDE THE WORK, as on every agent page: test case workbooks and run
+            reports are listed, opened, raised and approved here. */}
+        <aside aria-label="Documents" className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r">
+          <StageVersionPanel projectId={id} phase="testing" className="mb-3 shrink-0" />
+          <DocumentList projectId={id} items={documentsQ.data ?? null} stage="testing" className="flex min-h-0 flex-1 flex-col" fillHeight selectedId={docView.openId} onSelect={docView.select} />
+        </aside>
+
+        {/* AN OPEN DOCUMENT SITS OVER THE PAGE'S OWN VIEW, which stays mounted underneath —
+            closing it returns to exactly where the work was. */}
+        {docView.openDoc && (
+          <div className="flex min-h-0 flex-col overflow-hidden">
+            <DocumentPreview artifact={docView.openDoc} project={projectQ.data?.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Testing" className="min-h-0 flex-1 overflow-auto" />
+          </div>
+        )}
+        <div className={cn("flex min-h-0 flex-col overflow-hidden", docView.openDoc && "hidden")}>
+          <div className="flex items-center gap-1 border-b px-2 py-1.5" role="tablist" aria-label="Testing">
+            <TabBtn active={mode === "suites"} onClick={() => setMode("suites")} icon={ListChecks}>Test cases &amp; runs</TabBtn>
+            <TabBtn active={mode === "history"} onClick={() => setMode("history")} icon={History}>History</TabBtn>
+            <TabBtn active={mode === "advanced"} onClick={() => setMode("advanced")} icon={SlidersHorizontal}>More test types</TabBtn>
+          </div>
+
+          {mode === "suites" ? (
+            <div className="min-h-0 flex-1 overflow-auto">
+              {entryId && entryQ.isLoading ? (
+                <div className="mx-auto max-w-5xl p-4 md:p-6"><LoadingState variant="card" /></div>
+              ) : (
+                <TestSuitesWorkflow
+                  projectId={id}
+                  target={target}
+                  onSelectTarget={() => setPickerOpen(true)}
+                  offeringId={agentModel}
+                  documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                  approvals={approvals}
+                  entry={entry}
+                  entryError={entryId && entryQ.isError ? (entryQ.error instanceof Error ? entryQ.error.message : "Unknown error.") : undefined}
+                  onOpenEntry={(next) => {
+                    // Starting over empties the page, branch included.
+                    if (!next) { hydratedFor.current = null; setTarget(null); }
+                    setEntryId(next);
+                  }}
+                  onShowHistory={() => setMode("history")}
+                />
+              )}
+            </div>
+          ) : mode === "history" ? (
+            <div className="min-h-0 flex-1 overflow-auto">
+              <SuiteHistory
+                projectId={id}
+                documents={documentsQ.isLoading ? null : documentsQ.data ?? []}
+                openEntryId={entryId}
+                onOpen={(next) => { setEntryId(next); setMode("suites"); }}
+              />
+            </div>
+          ) : (
+            /* THE INDIVIDUAL TEST TYPES, unchanged: smoke, performance, accessibility and the
+               rest still generate and run in one go from here. */
+            <div className="grid min-h-0 flex-1 overflow-hidden md:grid-cols-[340px_1fr]">
+              <div className="min-h-0 overflow-auto border-b md:border-b-0 md:border-r">
             <div className="space-y-4 p-3">
               <div>
                 <p className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wider">Test type</p>
@@ -342,10 +451,8 @@ export default function TestingPage() {
                 </p>
               </div>
             </div>
-          </aside>
-        )}
+              </div>
 
-        {/* Main results pane */}
         <main className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex items-center gap-1 border-b px-2 py-1.5">
             <TabBtn active={tab === "output"} onClick={() => setTab("output")} icon={ScrollText}>Output</TabBtn>
@@ -356,13 +463,25 @@ export default function TestingPage() {
               </a>
             )}
           </div>
-          {ranType === "unit" && unitQ.data?.available && (
+          {ranType === "unit" && unitQ.data?.available && !(tab === "output" && report) && (
             <UnitResultBar data={unitQ.data} busy={chat.busy} pending={prMut.isPending} onOpenPr={() => prMut.mutate()} />
           )}
           <div className="min-h-0 flex-1 overflow-auto">
             {tab === "output" ? (
-              <OutputView messages={chat.messages} busy={chat.busy} onOpenChat={() => setChatOpen(true)} hasTarget={!!target}
-                onSelectTarget={() => setPickerOpen(true)} />
+              report ? (
+                <>
+                  <TestRunReport
+                    report={report}
+                    actions={
+                      <TestsPrAction data={unitQ.data} busy={chat.busy} pending={prMut.isPending} onOpenPr={() => prMut.mutate()} />
+                    }
+                  />
+                  <AgentNotes messages={chat.messages} onOpenChat={() => setChatOpen(true)} />
+                </>
+              ) : (
+                <OutputView messages={chat.messages} busy={chat.busy} onOpenChat={() => setChatOpen(true)} hasTarget={!!target}
+                  onSelectTarget={() => setPickerOpen(true)} />
+              )
             ) : ranSession ? (
               <iframe title="QA report" src={`/api/testing/${id}/qa/${ranSession}`} className="h-full w-full bg-white" />
             ) : (
@@ -373,9 +492,12 @@ export default function TestingPage() {
             )}
           </div>
         </main>
+            </div>
+          )}
+        </div>
       </div>
 
-      <TestTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onSelected={setTarget} />
+      <TestTargetDialog open={pickerOpen} onOpenChange={setPickerOpen} projectId={id} onSelected={pickTarget} />
 
       <AgentChatDrawer
         open={chatOpen}
@@ -479,6 +601,60 @@ function UnitResultBar({ data, busy, pending, onOpenPr }: {
           {files.length > 8 && <span className="text-muted-foreground text-[10px]">+{files.length - 8} more</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The tests-PR button the results bar used to own, for the report's corner. */
+function TestsPrAction({ data, busy, pending, onOpenPr }: {
+  data: UnitResult | undefined; busy: boolean; pending: boolean; onOpenPr: () => void;
+}) {
+  if (!data?.available) return null;
+  const files = data.generated_files ?? [];
+  if (data.pr_url) {
+    return (
+      <a href={data.pr_url} target="_blank" rel="noreferrer">
+        <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+          <CheckCircle2 className="text-success size-3.5" aria-hidden />View tests PR
+        </Button>
+      </a>
+    );
+  }
+  if (files.length === 0) return null;
+  return (
+    <RequireRole capability="run:trigger" fallback={null}>
+      <Button size="sm" className="from-brand-gradient-from to-brand-gradient-to h-8 gap-1.5 bg-gradient-to-br text-xs font-semibold text-white"
+        onClick={onOpenPr} disabled={busy || pending}>
+        {pending ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <GitPullRequest className="size-3.5" aria-hidden />}
+        {pending ? "Opening PR…" : "Open tests PR"}
+      </Button>
+    </RequireRole>
+  );
+}
+
+/** What the agent said, folded under the report — the numbers lead, the prose is
+ *  there for whoever wants the reasoning. */
+function AgentNotes({ messages, onOpenChat }: {
+  messages: ReturnType<typeof useAgentChat>["messages"]; onOpenChat: () => void;
+}) {
+  const agentMsgs = messages.filter((m) => m.role === "agent" && m.content);
+  if (agentMsgs.length === 0) return null;
+  const last = agentMsgs[agentMsgs.length - 1]!;
+  return (
+    <div className="mx-auto max-w-5xl space-y-3 px-4 pb-6 md:px-6">
+      <details className="group rounded-xl border">
+        <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-4 py-2.5 text-xs font-semibold tracking-wide uppercase select-none">
+          <ScrollText className="size-3.5" aria-hidden />Agent notes
+          <span className="ml-auto font-normal normal-case tracking-normal group-open:hidden">show</span>
+          <span className="ml-auto hidden font-normal normal-case tracking-normal group-open:inline">hide</span>
+        </summary>
+        <div className="border-t px-4 py-3">
+          <MarkdownMessage content={last.content} />
+        </div>
+      </details>
+      <Button variant="outline" size="sm" onClick={onOpenChat}>
+        <MessageSquare className="size-4" aria-hidden />Ask a follow-up in chat
+      </Button>
     </div>
   );
 }

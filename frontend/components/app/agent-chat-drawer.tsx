@@ -399,23 +399,28 @@ export function AgentChatDrawer({
 
         <div className="flex min-w-0 flex-1 flex-col">
         <SheetHeader className="space-y-2 border-b p-4 text-left">
-          <SheetTitle className="flex items-center gap-2">
-            <Sparkles className="text-primary size-4" aria-hidden />
-            Agent chat
-          </SheetTitle>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <SheetTitle className="flex items-center gap-2">
+              <Sparkles className="text-primary size-4" aria-hidden />
+              Agent chat
+            </SheetTitle>
+            {context && (
+              <span
+                data-testid="agent-chat-agent-name"
+                className="bg-primary/10 text-primary border-primary/25 inline-flex items-center rounded-full border px-3 py-1 text-sm font-semibold"
+              >
+                {context.page}
+              </span>
+            )}
+          </div>
           <SheetDescription>
             Scoped to your current view. Actions here run with your permissions.
           </SheetDescription>
-          {context && (
+          {context?.artifactTitle && (
             <div className="flex flex-wrap gap-1.5 pt-1">
-              <Badge variant="secondary" className="font-mono text-[10px]">
-                {context.page}
+              <Badge variant="outline" className="font-mono text-[10px]">
+                {context.artifactTitle}
               </Badge>
-              {context.artifactTitle && (
-                <Badge variant="outline" className="font-mono text-[10px]">
-                  {context.artifactTitle}
-                </Badge>
-              )}
             </div>
           )}
         </SheetHeader>

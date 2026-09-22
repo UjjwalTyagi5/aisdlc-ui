@@ -31,7 +31,7 @@ export const listOpenPrs = (
 export interface PrepareBody {
   /** Where the code lives — omitted when the project has a single source. */
   provider?: string;
-  mode: "branch" | "pr";
+  mode: "branch" | "pr" | "repo";
   ado_project: string;
   repo_name: string;
   source_branch?: string;

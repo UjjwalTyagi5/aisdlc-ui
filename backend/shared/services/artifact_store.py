@@ -107,8 +107,9 @@ def blob_path_for(
     workspace_id: str | None = None,
     project_id: str | None = None,
     agent: str | None = None,
+    document_id: str | None = None,
 ) -> str:
-    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/{filename}`.
+    """`{tenant}/{business_unit}/{project}/{agent}/{run}/{type}/[{document}/]{filename}`.
 
     THE FIRST SEGMENT IS THE ISOLATION BOUNDARY and everything after it is
     organisation. Blob storage has no rows and no row-level security — it is a flat
@@ -133,6 +134,13 @@ def blob_path_for(
     same filename (`brd.docx`), and `upload_bytes` overwrites by default, so without it
     the second run silently destroys the first one's document.
 
+    THE DOCUMENT'S OWN ID, below the type, when the caller has one. The run segment was
+    meant to keep same-named documents apart, but a chat REUSES one run per project and
+    stage (`_get_or_create_chat_run`) — so eight Code Review reports of one commit, all
+    named alike, were written to ONE path, each overwriting the last, and every row's
+    download served whichever was written last. A document's id is unique by
+    construction. Rows written before this keep the paths they record.
+
     EVERY SEGMENT IS SANITISED, not just the filename. `artifact_type` comes from the
     agent rather than the user today, but it is one refactor away from being
     caller-supplied, and a `..` in any segment escapes the tenant prefix exactly as it
@@ -146,6 +154,7 @@ def blob_path_for(
             safe_leaf_name(str(agent)) if agent else _NO_AGENT,
             safe_leaf_name(str(run_id)),
             safe_leaf_name(artifact_type),
+            *([safe_leaf_name(str(document_id))] if document_id else []),
             safe_leaf_name(filename),
         )
     )
@@ -153,6 +162,20 @@ def blob_path_for(
 
 _process_blob_client: Any = None
 _blob_client_tried = False
+
+
+def set_process_blob_client(client: Any) -> None:
+    """Hand this module the client the app already built, in the lifespan.
+
+    WHY THE APP SHOULD PRIME THIS. Built lazily instead, the client is constructed by
+    whichever caller gets there first — in practice an agent tool, inside the transient
+    `asyncio.run()` loop its graph node uses. The Azure client then treats that loop as
+    its home (see `azure_blob._service`), and when the loop ends the client has to be
+    replaced, abandoning an aiohttp session each time. Priming it from the lifespan means
+    the long-lived loop owns it and every sub-loop borrows a client it closes itself.
+    """
+    global _process_blob_client, _blob_client_tried
+    _process_blob_client, _blob_client_tried = client, True
 
 
 def get_blob_client() -> Any:
@@ -174,12 +197,16 @@ def get_blob_client() -> Any:
         return _process_blob_client
     _blob_client_tried = True
     try:
-        from config.env import AZURE_BLOB_ACCOUNT_URL  # noqa: PLC0415
-        if not AZURE_BLOB_ACCOUNT_URL:
-            logger.info("AZURE_BLOB_ACCOUNT_URL unset — generated files stay local")
-            return None
-        from shared.storage.azure_blob import BlobStorageClient  # noqa: PLC0415
-        _process_blob_client = BlobStorageClient()
+        # The SAME decision the lifespan makes for `app.state.blob_client` — Azure,
+        # a local directory, or nothing — taken in one place so the request path and
+        # the agents' path can never store documents in two different places.
+        from shared.storage import build_blob_client  # noqa: PLC0415
+        _process_blob_client = build_blob_client()
+        if _process_blob_client is None:
+            logger.info(
+                "neither AZURE_BLOB_ACCOUNT_URL nor ARTIFACT_STORAGE_ROOT is set — "
+                "generated files stay local and unstored"
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Blob client unavailable: %s", type(exc).__name__)
         _process_blob_client = None
@@ -317,6 +344,7 @@ async def store_artifact(
         workspace_id=workspace_id,
         project_id=project_id,
         agent=agent,
+        document_id=str(artifact_id),
     )
 
     # THE BYTES GO TO THE PENDING AREA, NOT THE FINAL PATH. Until whoever runs the

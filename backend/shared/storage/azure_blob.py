@@ -2,6 +2,15 @@
 
 One instance per FastAPI app lifetime — store on app.state, close in lifespan shutdown.
 
+LOOP AFFINITY (the reason for `_service`). The SDK's async client holds an aiohttp
+session bound to the event loop that created it, and the LangGraph agents execute their
+tools inside a fresh `asyncio.run()` loop — the same trap `shared/db.py` documents for
+asyncpg and answers with NullPool. Reusing one client across both loops fails with
+"Task ... got Future ... attached to a different loop", which surfaced as
+"Artifact upload failed for run ... RuntimeError" and a document row whose bytes were
+never stored. So: the long-lived client serves its own loop, and a call arriving on any
+other loop gets a short-lived client that is closed when the call returns.
+
 SAS URL generation (evidence export — REQ-M8-07, T-M8-15):
   generate_evidence_sas_url() uses the user-delegation path
   (get_user_delegation_key → generate_blob_sas(user_delegation_key=...)) because
@@ -12,8 +21,11 @@ SAS URL generation (evidence export — REQ-M8-07, T-M8-15):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import AsyncIterator
 
 from azure.storage.blob import BlobSasPermissions, ContentSettings, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient
@@ -35,10 +47,46 @@ class BlobStorageClient:
         container: str = _DEFAULT_CONTAINER,
     ) -> None:
         self._credential = get_azure_credential()  # shared, do not close
+        self._account_url = account_url
         self._client = BlobServiceClient(
             account_url=account_url, credential=self._credential
         )
         self._container = container
+        #: The loop `self._client` belongs to. Claimed here when the client is built on a
+        #: running loop — the lifespan case, so the app's loop owns it and every agent
+        #: sub-loop borrows. Otherwise the first awaited use claims it.
+        try:
+            self._home_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._home_loop = None
+
+    @asynccontextmanager
+    async def _service(self) -> AsyncIterator[BlobServiceClient]:
+        """A client safe to await on THIS loop — see the loop-affinity note above.
+
+        The first awaited call claims the long-lived client for its loop. Calls from
+        another loop (an agent's `asyncio.run` sub-loop) borrow a client of their own,
+        closed on the way out, so no session outlives the loop it was opened on.
+        """
+        loop = asyncio.get_running_loop()
+        if self._home_loop is not None and self._home_loop.is_closed():
+            # Its session died with its loop; the object cannot be closed from here.
+            self._client = BlobServiceClient(
+                account_url=self._account_url, credential=self._credential
+            )
+            self._home_loop = None
+        if self._home_loop is None:
+            self._home_loop = loop
+        if loop is self._home_loop:
+            yield self._client
+            return
+        borrowed = BlobServiceClient(
+            account_url=self._account_url, credential=self._credential
+        )
+        try:
+            yield borrowed
+        finally:
+            await borrowed.close()
 
     async def upload_bytes(
         self,
@@ -55,22 +103,22 @@ class BlobStorageClient:
 
         Returns the URL of the uploaded blob.
         """
-        container_client = self._client.get_container_client(self._container)
-        blob_client = container_client.get_blob_client(blob_name)
-        await blob_client.upload_blob(
-            data,
-            blob_type="BlockBlob",
-            content_settings=ContentSettings(content_type=content_type),
-            overwrite=overwrite,
-        )
-        return blob_client.url
+        async with self._service() as service:
+            blob_client = service.get_container_client(self._container).get_blob_client(blob_name)
+            await blob_client.upload_blob(
+                data,
+                blob_type="BlockBlob",
+                content_settings=ContentSettings(content_type=content_type),
+                overwrite=overwrite,
+            )
+            return blob_client.url
 
     async def download_bytes(self, blob_name: str) -> bytes:
         """Download blob content as bytes."""
-        container_client = self._client.get_container_client(self._container)
-        blob_client = container_client.get_blob_client(blob_name)
-        stream = await blob_client.download_blob()
-        return await stream.readall()
+        async with self._service() as service:
+            blob_client = service.get_container_client(self._container).get_blob_client(blob_name)
+            stream = await blob_client.download_blob()
+            return await stream.readall()
 
     async def delete_blob(self, blob_name: str) -> bool:
         """Delete a blob. Returns True if it was removed, False if it was not there.
@@ -86,13 +134,13 @@ class BlobStorageClient:
         """
         from azure.core.exceptions import ResourceNotFoundError
 
-        container_client = self._client.get_container_client(self._container)
-        blob_client = container_client.get_blob_client(blob_name)
-        try:
-            await blob_client.delete_blob()
-            return True
-        except ResourceNotFoundError:
-            return False
+        async with self._service() as service:
+            blob_client = service.get_container_client(self._container).get_blob_client(blob_name)
+            try:
+                await blob_client.delete_blob()
+                return True
+            except ResourceNotFoundError:
+                return False
 
     async def move_blob(self, src: str, dst: str, content_type: str | None = None) -> str:
         """Copy `src` to `dst`, verify, then delete `src`. Returns the new blob's URL.
@@ -127,6 +175,13 @@ class BlobStorageClient:
             container=self._container, blob=blob_name
         )
         return blob_client.url
+
+    async def user_delegation_key(self, key_start: datetime, key_expiry: datetime):
+        """A user-delegation key, minted on whichever loop is calling."""
+        async with self._service() as service:
+            return await service.get_user_delegation_key(
+                key_start_time=key_start, key_expiry_time=key_expiry
+            )
 
     async def close(self) -> None:
         """Close the underlying SDK client. Call this in FastAPI lifespan shutdown.
@@ -167,10 +222,7 @@ async def generate_evidence_sas_url(
 
     # Step 1: mint a user-delegation key via the storage service
     # (requires Storage Blob Data Delegator role on the account — Managed Identity)
-    udk = await blob_client._client.get_user_delegation_key(
-        key_start_time=key_start,
-        key_expiry_time=key_expiry,
-    )
+    udk = await blob_client.user_delegation_key(key_start, key_expiry)
 
     # Step 2: generate the SAS token using the user-delegation key (NOT account_key)
     account_name = blob_client._client.account_name

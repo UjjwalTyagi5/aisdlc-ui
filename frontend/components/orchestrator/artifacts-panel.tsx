@@ -504,21 +504,28 @@ function ArtifactsTab({
 
   // Collapsing a group deselects the artifact if the selection lives inside it —
   // otherwise the viewer would keep showing an item whose row is now hidden.
+  //
+  // THE DESELECT IS DECIDED HERE, NOT INSIDE THE UPDATER. `onSelectArtifact` is the
+  // parent's setState, and React runs updater functions during render whenever it
+  // cannot compute the new state eagerly — so calling it from inside `setExpanded`'s
+  // updater was a parent setState during this component's render: "Cannot update a
+  // component (OrchestratorCockpit) while rendering a different component
+  // (ArtifactsTab)", on the Orchestrator page, on collapse.
   const toggleGroup = React.useCallback(
     (stage: string) => {
+      const collapsing = expanded.has(stage);
+      if (collapsing) {
+        const selectedStage = artifacts.find((a) => a.id === openArtifactId)?.stage;
+        if (selectedStage === stage) onSelectArtifact(null);
+      }
       setExpanded((prev) => {
         const next = new Set(prev);
-        if (next.has(stage)) {
-          next.delete(stage);
-          const selectedStage = artifacts.find((a) => a.id === openArtifactId)?.stage;
-          if (selectedStage === stage) onSelectArtifact(null);
-        } else {
-          next.add(stage);
-        }
+        if (next.has(stage)) next.delete(stage);
+        else next.add(stage);
         return next;
       });
     },
-    [artifacts, openArtifactId, onSelectArtifact],
+    [expanded, artifacts, openArtifactId, onSelectArtifact],
   );
 
   // Clicking a row toggles it: re-selecting the open artifact closes it (→ empty state).

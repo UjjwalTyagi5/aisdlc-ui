@@ -1,12 +1,14 @@
 """Typed output artifact for the Code Review agent (`code_review_artifacts`).
 
-Read-only review of a branch-vs-base diff OR an existing PR. The agent never
-mutates the repo — it emits this structured artifact (findings, coverage,
-conformance, metrics, summary, merge recommendation).
+Read-only review of a branch-vs-base diff, an existing PR, or a WHOLE BRANCH. The agent
+never mutates the repo — it emits this structured artifact (findings, coverage,
+conformance, metrics, summary, merge recommendation) plus the security scan of the
+checkout (secrets, static analysis, vulnerable dependencies, SBOM), the scope actually
+reviewed, and the report document it was written up as.
 """
 from __future__ import annotations
 
-from typing import List, Literal, Optional, get_args
+from typing import Any, Dict, List, Literal, Optional, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -36,7 +38,7 @@ def _normalize_enum(value: object, valid: set, default: str) -> str:
 class ReviewContext(BaseModel):
     repo_name: str = ""
     ado_project: str = ""
-    mode: Literal["branch", "pr"] = "branch"
+    mode: Literal["branch", "pr", "repo"] = "branch"
     source_branch: str = ""
     base_branch: str = ""
     pr_id: Optional[str] = None
@@ -107,6 +109,11 @@ class CodeReviewArtifact(BaseModel):
     metrics: ReviewMetrics = Field(default_factory=ReviewMetrics)
     diff: str = ""                   # unified diff under review (capped)
     status: Literal["pending", "reviewed"] = "reviewed"
+    #: What was reviewed: {mode, files_total, reviewable_files, lines_total, languages,
+    #: files_read: [...], files_changed?}. Whole-branch reviews state coverage from it.
+    scope: Dict[str, Any] = Field(default_factory=dict)
+    #: The report document: {filename, url} or {error}.
+    document: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("merge_recommendation", mode="before")
     @classmethod

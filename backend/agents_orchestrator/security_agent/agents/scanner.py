@@ -8,6 +8,7 @@ Import as: from agents_orchestrator.security_agent.agents.scanner import app
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
@@ -27,6 +28,7 @@ from agents_orchestrator.security_agent.tools.security_tools import (
     read_design_artifacts,
     submit_security_review,
 )
+from shared.tools.document_approval import make_approval_tools
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node, MCP_TOOLS_PROMPT_NOTE
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -68,6 +70,19 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _SHAREPOINT_TOOLS = []
 
+try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM. Asked to publish an approved
+    # document to Confluence, this agent used to answer that the platform "only
+    # publishes to SharePoint" — truthfully, because the Confluence tools existed in
+    # the connector and were bound to no agent but Documentation. Bound the same way as
+    # SharePoint: agent and stage fixed here, never taken from a tool argument.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="security", stage="security")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("Security agent: Confluence document tools unavailable")
+
 _tools = [
     scan_dependencies,
     scan_code,
@@ -77,8 +92,11 @@ _tools = [
     search_repo,
     read_design_artifacts,
     submit_security_review,
+    # The filed report is a DRAFT; the same raise the Documents panel's button does.
+    *make_approval_tools("security"),
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_CONFLUENCE_TOOLS,
 ]
 
 
@@ -187,9 +205,50 @@ _SUBMIT_NUDGE = (
 )
 
 
+def _this_turn(state: AgentState) -> list:
+    """Messages since the reader's last real message — this turn, not the session.
+
+    The chat is one LangGraph thread with a MemorySaver, so scanning the whole transcript
+    latched both checks below: one submission (or one nudge) anywhere in the session and
+    every later scan in the same chat routed straight to END, prose and all. The nudge
+    itself arrives as a HumanMessage and is excluded by text — it is ours."""
+    msgs = state["messages"]
+    start = 0
+    for i, m in enumerate(msgs):
+        content = getattr(m, "content", "") or ""
+        if m.__class__.__name__ == "HumanMessage" and (not isinstance(content, str) or _SUBMIT_NUDGE not in content):
+            start = i
+    return msgs[start:]
+
+
+#: The reader asking for a scan or review, in the words the page and people use. Not
+#: "Send the security report for approval" — a request ABOUT a report is not a scan.
+_SCAN_REQUEST_RE = re.compile(r"\b(?:re-?)?(?:scan|review)\b.{0,40}\b(?:the|this|that|my|it|branch|pr|code|repo)\b|\bsecurity (?:scan|review)\b", re.IGNORECASE)
+_SCAN_TOOLS = {"scan_dependencies", "scan_code", "scan_secrets", "generate_sbom"}
+
+
+def _is_scan_turn(state: AgentState) -> bool:
+    """True when this turn is a scan: the reader asked for one, or the agent ran a scanner.
+
+    THE NUDGE FIRED ON EVERY TURN THAT DID NOT SUBMIT — the Code Review agent, which
+    shares this graph shape, was made to file a second review when asked only to send
+    its report for approval. Same guard here, before it is observed."""
+    turn = _this_turn(state)
+    if turn and turn[0].__class__.__name__ == "HumanMessage":
+        asked = turn[0].content if isinstance(turn[0].content, str) else ""
+        if _SCAN_REQUEST_RE.search(asked):
+            return True
+    for m in turn:
+        for tc in getattr(m, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name in _SCAN_TOOLS:
+                return True
+    return False
+
+
 def _has_submitted(state: AgentState) -> bool:
-    """True once submit_security_review has actually been called in this transcript."""
-    for m in state["messages"]:
+    """True once submit_security_review has been called for THIS turn's scan."""
+    for m in _this_turn(state):
         for tc in getattr(m, "tool_calls", None) or []:
             name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
             if name == "submit_security_review":
@@ -200,7 +259,7 @@ def _has_submitted(state: AgentState) -> bool:
 def _already_nudged(state: AgentState) -> bool:
     return any(
         _SUBMIT_NUDGE in (getattr(m, "content", "") or "")
-        for m in state["messages"]
+        for m in _this_turn(state)
         if isinstance(getattr(m, "content", None), str)
     )
 
@@ -219,7 +278,7 @@ def route_fn(state: AgentState) -> str:
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
         return "tools"
-    if not _has_submitted(state) and not _already_nudged(state):
+    if _is_scan_turn(state) and not _has_submitted(state) and not _already_nudged(state):
         return "finalize"
     return END
 

@@ -336,39 +336,72 @@ def clone_and_diff(
     """Clone *remote_url* read-only and compute the diff of *source* vs *base*.
 
     Returns {diff, files:[{path,status,added,removed}], head_sha, base_sha,
-    truncated}. Raises RuntimeError (PAT scrubbed) on a genuine clone failure.
-    The diff is `base...source` (three-dot: changes introduced on source since the
-    merge-base), capped at *max_bytes*.
+    commits_ahead, truncated}. Raises RuntimeError (PAT scrubbed) on a genuine clone
+    failure, and on any git step that fails afterwards — see `diff_refs`.
     """
     work_path = pathlib.Path(work_dir)
     auth_url = _inject_pat(remote_url, pat)
-
-    def _git(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", *_GIT_NO_HELPER, *args], cwd=str(work_path), capture_output=True,
-            text=True, timeout=timeout, encoding="utf-8", errors="replace", env=_git_env(),
-        )
 
     if work_path.exists():
         _force_rmtree(work_path)
     work_path.mkdir(parents=True, exist_ok=True)
 
-    clone = _git(["clone", "--no-single-branch", auth_url, "."])
+    clone = subprocess.run(
+        ["git", *_GIT_NO_HELPER, "clone", "--no-single-branch", auth_url, "."],
+        cwd=str(work_path), capture_output=True, text=True, timeout=300,
+        encoding="utf-8", errors="replace", env=_git_env(),
+    )
     if clone.returncode != 0:
         raw = clone.stderr.strip() or clone.stdout.strip()
         raise RuntimeError(_scrub(raw, pat))
+    try:
+        return diff_refs(work_dir, f"origin/{source}", f"origin/{base}", max_bytes=max_bytes, fetch=(source, base))
+    except RuntimeError as exc:
+        raise RuntimeError(_scrub(str(exc), pat)) from None
 
-    # Make sure both refs are present locally.
-    _git(["fetch", "origin", source, base], timeout=120)
-    rng = f"origin/{base}...origin/{source}"
 
-    head_sha = (_git(["rev-parse", f"origin/{source}"], timeout=30).stdout or "").strip()
-    base_sha = (_git(["merge-base", f"origin/{base}", f"origin/{source}"], timeout=30).stdout or "").strip()
+def diff_refs(
+    work_dir: str, source_ref: str, base_ref: str, *, max_bytes: int = 200_000,
+    fetch: tuple[str, ...] = (),
+) -> dict:
+    """The change *source_ref* introduces since it split from *base_ref*, in an existing
+    clone. `base...source` (three-dot: changes on source since the merge-base).
 
-    name_status = _git(["diff", "--name-status", "-M", rng], timeout=120)
-    numstat = _git(["diff", "--numstat", rng], timeout=120)
+    EVERY GIT STEP IS CHECKED. This used to ignore git's exit codes, so a ref that did
+    not exist, a failed merge-base or a failed diff all came back as an EMPTY diff — the
+    same screen as a branch with genuinely nothing in it. A reviewer shown "0 files
+    changed" cannot tell those apart; now a failure raises with git's own message.
+
+    `commits_ahead` is how many commits the source has that the base does not. Zero
+    means there is nothing to review here, which the caller says in words.
+    """
+    work_path = pathlib.Path(work_dir)
+
+    def _git(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *_GIT_NO_HELPER, *args], cwd=str(work_path), capture_output=True,
+            text=True, timeout=timeout, encoding="utf-8", errors="replace", env=_git_env(),
+        )
+
+    def _checked(args: list[str], what: str, timeout: int = 120) -> str:
+        out = _git(args, timeout=timeout)
+        if out.returncode != 0:
+            detail = (out.stderr or out.stdout or "").strip().splitlines()
+            raise RuntimeError(f"{what} failed: {detail[-1] if detail else f'git exit {out.returncode}'}")
+        return out.stdout or ""
+
+    if fetch:
+        _checked(["fetch", "origin", *fetch], "Fetching the branches")
+    head_sha = _checked(["rev-parse", "--verify", source_ref], f"Resolving {source_ref}", timeout=30).strip()
+    base_tip = _checked(["rev-parse", "--verify", base_ref], f"Resolving {base_ref}", timeout=30).strip()
+    base_sha = _checked(["merge-base", base_ref, source_ref], "Finding the merge base", timeout=30).strip()
+    commits_ahead = int(_checked(["rev-list", "--count", f"{base_ref}..{source_ref}"], "Counting commits", timeout=30).strip() or 0)
+
+    rng = f"{base_ref}...{source_ref}"
+    name_status = _checked(["diff", "--name-status", "-M", rng], "Listing changed files")
+    numstat = _checked(["diff", "--numstat", rng], "Counting changed lines")
     counts: dict[str, tuple[int, int]] = {}
-    for ln in (numstat.stdout or "").splitlines():
+    for ln in numstat.splitlines():
         parts = ln.split("\t")
         if len(parts) >= 3:
             a = int(parts[0]) if parts[0].isdigit() else 0
@@ -376,7 +409,7 @@ def clone_and_diff(
             counts[parts[2]] = (a, r)
 
     files = []
-    for ln in (name_status.stdout or "").splitlines():
+    for ln in name_status.splitlines():
         parts = ln.split("\t")
         if len(parts) < 2:
             continue
@@ -385,8 +418,7 @@ def clone_and_diff(
         a, r = counts.get(path, (0, 0))
         files.append({"path": path, "status": status, "added": a, "removed": r})
 
-    full = _git(["diff", "--unified=3", "-M", rng], timeout=180)
-    diff_text = full.stdout or ""
+    diff_text = _checked(["diff", "--unified=3", "-M", rng], "Computing the diff", timeout=180)
     truncated = False
     if len(diff_text.encode("utf-8", "ignore")) > max_bytes:
         diff_text = diff_text.encode("utf-8", "ignore")[:max_bytes].decode("utf-8", "ignore")
@@ -397,6 +429,8 @@ def clone_and_diff(
         "files": files,
         "head_sha": head_sha,
         "base_sha": base_sha,
+        "base_tip_sha": base_tip,
+        "commits_ahead": commits_ahead,
         "truncated": truncated,
     }
 

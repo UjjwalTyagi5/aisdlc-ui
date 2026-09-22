@@ -217,3 +217,132 @@ async def test_extending_an_expiry_is_still_audited(org):
         expires_at=first + timedelta(hours=4), granted_by="admin-1",
     )
     assert len(await _events(org["org"], RBAC_ROLE_GRANTED)) == 2
+
+
+# ── PRD §34.9's before/after ──────────────────────────────────────────────────
+#
+# A grant recorded only the role it conferred, which answers "what do they hold now"
+# and not "what changed" — and those are different questions. `none -> project_admin`
+# is an appointment, `developer -> project_admin` is a promotion, and a row reading
+# `project_admin` is indistinguishable from either. The Change column on the Audit
+# Trail was empty on every row because nothing had ever written the pair.
+
+
+@pytest.mark.asyncio
+async def test_an_appointment_records_that_they_held_nothing_before(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(
+        subject, org["bu"], "developer", tenant_id=org["org"],
+        scope_kind="business_unit", granted_by="admin-1",
+    )
+
+    payload = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]["payload"]
+    assert payload["before"] == "none"
+    assert payload["after"] == "developer until no expiry"
+
+
+@pytest.mark.asyncio
+async def test_an_extension_records_both_expiries_not_none(org):
+    """The distinction the single `role` field could never make.
+
+    An extension and an appointment share an event_type, and read as the same row
+    unless the prior state is on it. This is the one that would otherwise look like
+    somebody was appointed twice.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    subject = f"subject-{_uuid.uuid4()}"
+    first = datetime.now(tz=timezone.utc) + timedelta(days=1)
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        expires_at=first, granted_by="admin-1",
+    )
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        expires_at=first + timedelta(days=30), granted_by="admin-1",
+    )
+
+    events = await _events(org["org"], RBAC_ROLE_GRANTED)
+    assert len(events) == 2, events
+    extension = [e for e in events if e["payload"]["before"] != "none"]
+    assert len(extension) == 1, [e["payload"] for e in events]
+    payload = extension[0]["payload"]
+    assert payload["before"] == f"qa until {first.date().isoformat()}"
+    assert payload["after"] == f"qa until {(first + timedelta(days=30)).date().isoformat()}"
+
+
+@pytest.mark.asyncio
+async def test_a_revocation_records_what_was_taken_away(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit")
+    await revoke_role(
+        subject, org["bu"], "qa", tenant_id=org["org"],
+        scope_kind="business_unit", revoked_by="admin-1",
+    )
+
+    payload = (await _events(org["org"], RBAC_ROLE_REVOKED))[0]["payload"]
+    assert payload["before"] == "qa"
+    assert payload["after"] == "none"
+
+
+# ── PRD §34.9: the actor is a real person ────────────────────────────────────
+#
+# "The real person — never an agent, never a service account, never a role." A NULL
+# actor renders as "system", which is honest for the platform seeding its own org
+# admins at boot and a LIE for a human action that lost its actor on the way in.
+# `getattr(request.state, "user_id", None)` is the shape that loses it, and it appears
+# at every grant call site. The two cases must not look alike.
+
+
+@pytest.mark.asyncio
+async def test_a_system_write_says_why_it_had_no_actor(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        system_reason="startup_seeding",
+    )
+
+    e = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]
+    assert e["actor_id"] is None
+    assert e["payload"]["system_reason"] == "startup_seeding"
+    assert "actor_unattributed" not in e["payload"]
+
+
+@pytest.mark.asyncio
+async def test_an_unexplained_missing_actor_is_marked_on_the_row(org):
+    """The defect case. It must be visible in the trail, not just in a log line.
+
+    A row that cannot say who acted has to SAY that it cannot, rather than reading as
+    a system action and being filed with the boot-time seeding.
+    """
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(subject, org["bu"], "developer", tenant_id=org["org"], scope_kind="business_unit")
+
+    e = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]
+    assert e["actor_id"] is None
+    assert e["payload"]["actor_unattributed"] is True
+    assert "system_reason" not in e["payload"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_actor_is_never_marked_unattributed(org):
+    subject = f"subject-{_uuid.uuid4()}"
+    await grant_role(
+        subject, org["bu"], "qa", tenant_id=org["org"], scope_kind="business_unit",
+        granted_by="a-real-person",
+    )
+
+    payload = (await _events(org["org"], RBAC_ROLE_GRANTED))[0]["payload"]
+    assert "actor_unattributed" not in payload
+    assert "system_reason" not in payload
+
+
+@pytest.mark.asyncio
+async def test_the_boot_seeder_names_itself(org):
+    """`seed_org_admins` is the one legitimate unattributed writer on the platform."""
+    import inspect
+
+    from shared.auth import bootstrap
+
+    src = inspect.getsource(bootstrap)
+    assert 'system_reason="startup_seeding"' in src

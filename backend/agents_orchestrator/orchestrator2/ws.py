@@ -92,6 +92,7 @@ from agents_orchestrator.orchestrator2.dispatch import run_agent
 from agents_orchestrator.orchestrator2.project_documents import (
     approved_documents_context,
 )
+from agents_orchestrator.orchestrator2.project_tools import connected_tools_context
 from agents_orchestrator.orchestrator2.router import (
     _HISTORY_LIMIT as _ROUTER_HISTORY_LIMIT,
     route,
@@ -778,6 +779,14 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                 # anyway would tell the user their approved BRD does not exist.
                 documents = await approved_documents_context(project_id, tenant_id)
 
+                # What the PROJECT has connected, per agent — the same
+                # `Project.connectors` the agents bind their tools from. For the
+                # router only: it is what stops "no agent integrates with
+                # Confluence" being said about a project whose Requirements agent
+                # published to Confluence minutes earlier. The agent needs no copy;
+                # it holds the tools themselves. Same posture on failure as above.
+                connected_tools = await connected_tools_context(project_id, tenant_id)
+
                 if override_agent:
                     agent_id = override_agent
                     reason = "You named this agent, so nothing was inferred."
@@ -809,6 +818,9 @@ async def orchestrator2_ws(websocket: WebSocket) -> None:
                         # exists is answered from the record, and a request about one
                         # of them routes to the agent that produced it.
                         documents=documents,
+                        # Which connectors this project granted to which agent, so a
+                        # request to use one routes there instead of being declined.
+                        connected_tools=connected_tools,
                     )
                     if decision.agent_id is None:
                         # Answered without a delivery agent. NO `agent.selected`:

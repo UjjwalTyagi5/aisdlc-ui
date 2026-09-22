@@ -133,6 +133,111 @@ async def _unapproved_named(tenant_id: str, project_id: str, name: str) -> Optio
     return None
 
 
+# ── the refusal when the document belongs to another stage ─────────────────────
+#
+# THE RULE STANDS: publishing files a document into a system this platform cannot take
+# it back out of, so it stays with the stage that produced the document
+# (test_document_read_write_separation.py). What changed is the ANSWER when the rule
+# bites. Since `stage_tools` binds these publishers to every stage the project grants a
+# connector to, the Project Manager agent was asked to file a Requirements BRD it could
+# list and read — and said "no approved documents to publish", which is true for its own
+# stage and was read as a lost file. A refusal that names the owning stage sends the
+# user to the right agent instead of re-approving a document that was never the problem.
+
+
+def _stage_label(stage: str) -> str:
+    """The agent's display name for a stage, falling back to the id."""
+    from config.agent_registry import AGENT_REGISTRY  # noqa: PLC0415
+
+    definition = AGENT_REGISTRY.get(stage)
+    name = getattr(definition, "name", None) or stage
+    return name.removesuffix(" Agent")
+
+
+async def _approved_elsewhere(tenant_id: str, project_id: str, stage: str) -> list[dict]:
+    """Approved, publishable documents that belong to OTHER stages — name and owner.
+
+    The complement of `_approved_documents` for the same project: what exists but is
+    not this stage's to file. Project-wide documents are never here (they are this
+    stage's, like every stage's), and stories and blob-less rows are excluded for the
+    same reason they are excluded there.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.models.orm import Artifact  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as db:
+        rows = (await db.execute(
+            select(Artifact).where(
+                Artifact.project_id == project_id,
+                Artifact.approval_status == "approved",
+            )
+        )).scalars().all()
+    return [
+        {"name": (a.blob_path or "").rsplit("/", 1)[-1], "stage": a.stage}
+        for a in rows
+        if a.artifact_type != "story" and a.blob_path
+        and a.stage is not None and a.stage != stage
+    ]
+
+
+async def _approved_owner_stage(tenant_id: str, project_id: str, name: str) -> Optional[str]:
+    """The stage that produced an approved document of this name, or None."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.models.orm import Artifact  # noqa: PLC0415
+
+    async with get_db_session_for_tenant(tenant_id) as db:
+        rows = (await db.execute(
+            select(Artifact).where(
+                Artifact.project_id == project_id,
+                Artifact.approval_status == "approved",
+            )
+        )).scalars().all()
+    for a in rows:
+        if (a.blob_path or "").rsplit("/", 1)[-1] == name and a.stage:
+            return a.stage
+    return None
+
+
+def nothing_to_publish(stage: str, elsewhere: list[dict]) -> str:
+    """What to say when this stage has nothing to publish. Pure; no I/O.
+
+    Names every approved document another stage holds, with that stage, so "nothing
+    here" never reads as "nothing anywhere" while a BRD sits approved on the
+    Requirements page.
+    """
+    if not elsewhere:
+        return (
+            "There are no approved documents to publish yet. A document becomes "
+            "publishable once its owner approves it."
+        )
+    listed = "; ".join(
+        f"{d['name']} (produced by the {_stage_label(str(d['stage']))} stage)"
+        for d in elsewhere
+    )
+    return (
+        f"The {_stage_label(stage)} stage has no approved documents of its own to "
+        f"publish. Approved documents produced by other stages exist — {listed} — and "
+        "publishing stays with the agent that produced a document, so ask that agent "
+        "(or publish from its own page) to file them. Do not re-approve them; they are "
+        "already approved."
+    )
+
+
+def owned_elsewhere(name: str, owner_stage: str) -> str:
+    """The refusal for a named document another stage produced. Pure; no I/O."""
+    owner = _stage_label(owner_stage)
+    return (
+        f"ERROR: {name!r} is approved, but it was produced by the {owner} stage, and "
+        "publishing stays with the agent that produced a document. Ask the "
+        f"{owner} agent to publish it — or publish it from the {owner} page. It does "
+        "not need re-approving."
+    )
+
+
 async def _download(blob_path: str) -> Optional[bytes]:
     from shared.services.artifact_store import get_blob_client  # noqa: PLC0415
 
@@ -185,13 +290,15 @@ def make_sharepoint_tools(agent_id: str, stage: str) -> list:
                         "published to SharePoint. Ask its owner to approve it first — "
                         "the Documents panel on this agent's screen is where that happens."
                     )
+                owner = await _approved_owner_stage(tenant_id, project_id, filename)
+                if owner:
+                    return owned_elsewhere(filename, owner)
                 return f"ERROR: no approved document named {filename!r} on this project."
             docs = wanted
 
         if not docs:
-            return (
-                "There are no approved documents to publish yet. A document becomes "
-                "publishable once its owner approves it."
+            return nothing_to_publish(
+                stage, await _approved_elsewhere(tenant_id, project_id, stage)
             )
 
         drive_id = target.get("drive_id", "")

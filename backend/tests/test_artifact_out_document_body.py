@@ -170,3 +170,18 @@ def test_another_tenants_prefix_is_not_treated_as_this_tenants_blob():
     other = f"{uuid.uuid4()}/{uuid.uuid4()}/document/x.pdf"
     out = _out(_artifact(blob_path=other, blob_url=None))
     assert not (out.downloadUrl or "").startswith("/api/artifacts/")
+
+
+# -- the phase is the UI's name -------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_code_review_document_reports_the_ui_phase_and_keeps_the_stage():
+    """`code_review` is not in the frontend's Phase enum. The first Code Review report
+    filed made the whole project's artifact list fail its schema, which blanked every
+    Documents panel. `stage` stays the backend name the panels filter on."""
+    row = _artifact(blob_path="/var/app/generated/x/QuickLink_Code_Review.docx", blob_url=None)
+    row.stage = "code_review"
+    out = ArtifactOut.from_orm_artifact(row, "code_review", str(PROJECT))
+    assert out.phase == "review"
+    assert out.stage == "code_review"

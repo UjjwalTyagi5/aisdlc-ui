@@ -71,18 +71,28 @@ async def render_document(content: str, full_path: str, title: str = "") -> str:
 
 
 def export_result_message(filename: str, url: str, extras: Iterable[str] = ()) -> str:
-    """The reply shape both agents use after producing a file.
+    """The reply shape every agent uses after producing a file.
 
-    States that the file is NOT yet in the project's artifacts. Generation and
-    publication are separate acts (see chat_artifacts.register_generated_file), and an
-    agent that says "saved" for the first one teaches the user to expect the second.
+    A FILE WITHOUT A LINK IS AN ERROR. When the announcement failed there is no URL,
+    and "Generated 'x.docx'." with nothing after it is exactly the shape a model turns
+    into "your document is ready" plus a link it writes itself. So there is no success
+    message without the link.
+
+    THE STATE IT IS IN, stated plainly: `register_generated_file` records every file as
+    a DRAFT in the project's Documents — listed and downloadable, in nobody's approval
+    queue until someone raises it. This used to tell the model to "call
+    save_to_project_artifacts", a tool that had already been removed.
     """
-    parts = [f"Generated '{filename}'."]
-    if url:
-        parts.append(f"Download it here: {url}")
+    if not url:
+        return (
+            f"Error: '{filename}' was written but could not be published — there is no "
+            "download link and it is not in the project's Documents. Tell the user it was "
+            "not delivered. Do not write a link for it."
+        )
+    parts = [f"Generated '{filename}'.", f"Download it here: {url}"]
     parts.extend(extras)
     parts.append(
-        "It is NOT yet saved to the project's artifacts — ask the user whether to save "
-        "it there, and call save_to_project_artifacts if they agree."
+        "It is recorded in the project's Documents as a DRAFT — not yet raised for "
+        "approval. Give the user this exact link; never write a different one."
     )
     return " ".join(parts)

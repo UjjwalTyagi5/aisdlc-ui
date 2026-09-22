@@ -73,6 +73,11 @@ export const DeploymentArtifact = z.object({
   pr_url: z.string().nullable().optional(),
   pr_title: z.string().nullable().optional(),
   status: z.string().default("assessed"),
+  /** The filed Deployment Readiness Report; `artifact_id` is its document row. */
+  document: z
+    .object({ filename: z.string(), url: z.string(), error: z.string(), artifact_id: z.string().nullable() })
+    .partial()
+    .default({}),
 });
 export type DeploymentArtifact = z.infer<typeof DeploymentArtifact>;
 

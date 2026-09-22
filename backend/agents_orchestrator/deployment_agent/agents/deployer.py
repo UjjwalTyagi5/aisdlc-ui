@@ -41,6 +41,7 @@ from agents_orchestrator.deployment_agent.tools.pipeline_tools import (
     request_pipeline_creation,
     request_pipeline_run,
 )
+from shared.tools.document_approval import make_approval_tools
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     tenant_id: Optional[str]
+    project_id: Optional[str]
     model_id: Optional[str]
     offering_id: Optional[str]
 
@@ -76,6 +78,19 @@ try:
     _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="deployment", stage="deployment")
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _SHAREPOINT_TOOLS = []
+
+try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM. Asked to publish an approved
+    # document to Confluence, this agent used to answer that the platform "only
+    # publishes to SharePoint" — truthfully, because the Confluence tools existed in
+    # the connector and were bound to no agent but Documentation. Bound the same way as
+    # SharePoint: agent and stage fixed here, never taken from a tool argument.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="deployment", stage="deployment")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("Deployment agent: Confluence document tools unavailable")
 
 _tools = [
     inspect_repo,
@@ -102,6 +117,10 @@ _tools = [
     check_deployment_request,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    *_CONFLUENCE_TOOLS,
+    # The filed Deployment Readiness Report is a DRAFT; the same raise the Documents
+    # panel's button does.
+    *make_approval_tools("deployment"),
 ]
 
 
@@ -152,7 +171,9 @@ async def agent_node(state: AgentState) -> dict:
         tenant_id = state.get("tenant_id") or ""
         try:
             resolved = await resolve_model_for_run(
-                tenant_id, state.get("model_id"), offering_id=state.get("offering_id")
+                tenant_id, state.get("model_id"), offering_id=state.get("offering_id"),
+                # Explicit: a None project filters every project-granted offering out.
+                project_id=state.get("project_id"),
             )
         except (NoModelConfiguredError, ModelNotEnabledError) as exc:
             logger.warning(

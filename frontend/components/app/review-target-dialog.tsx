@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { GitBranch, GitPullRequest, Loader2 } from "lucide-react";
+import { FolderGit2, GitBranch, GitPullRequest, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { LoadingState } from "@/components/ui/loading-state";
+import { Callout } from "@/components/app/report-primitives";
 import {
   listAdoProjects,
   listAdoRepos,
@@ -29,7 +30,7 @@ import { qk } from "@/lib/api/query-keys";
 import type { PrepareResult } from "@/lib/schemas/code-review";
 import type { ProjectId } from "@/lib/schemas";
 
-type Mode = "branch" | "pr";
+type Mode = "branch" | "pr" | "repo";
 
 export interface ReviewTargetDialogProps {
   open: boolean;
@@ -39,10 +40,15 @@ export interface ReviewTargetDialogProps {
 }
 
 /**
- * Pick what to review: a branch-vs-base diff OR an open PR. Cascade:
- *   mode → ADO project → repo → (source + base branches | open PR).
- * On submit it clones read-only + computes the diff (prepareReview) and hands the
- * result back so the page can render the Diff tab and start a review.
+ * Pick what to review: a branch-vs-base diff, an open PR, or a WHOLE BRANCH. Cascade:
+ *   mode → project → repo → (source + base branches | open PR | one branch).
+ * On submit it clones read-only and prepares the target (prepareReview), then hands the
+ * result back so the page can show the Diff (or the branch's Files) and start a review.
+ *
+ * A DIFF WITH NOTHING IN IT IS SAID, NOT STAGED. The backend answers "no_changes" with
+ * the reason (QuickLink's PR #35: two branch names on one commit), the dialog stays open
+ * and offers to review the whole branch instead — the review a reader in that position
+ * actually needs.
  */
 export function ReviewTargetDialog({
   open,
@@ -56,9 +62,16 @@ export function ReviewTargetDialog({
   const [source, setSource] = React.useState<string | null>(null);
   const [base, setBase] = React.useState<string | null>(null);
   const [prId, setPrId] = React.useState<string | null>(null);
+  const [noChanges, setNoChanges] = React.useState<PrepareResult | null>(null);
+
+  // A new choice makes the "nothing to review" answer stale.
+  React.useEffect(() => {
+    setNoChanges(null);
+  }, [mode, project, repo, source, base, prId]);
 
   React.useEffect(() => {
     if (!open) {
+      setNoChanges(null);
       setMode("branch");
       setProject(null);
       setRepo(null);
@@ -105,7 +118,7 @@ export function ReviewTargetDialog({
   const branchesQ = useQuery({
     queryKey: qk.devWorkspace.adoBranches(projectId, project ?? "", repo ?? "", provider ?? ""),
     queryFn: () => listAdoBranches(projectId, project!, repo!, provider ?? undefined),
-    enabled: open && mode === "branch" && !!provider && !!project && !!repo,
+    enabled: open && (mode === "branch" || mode === "repo") && !!provider && !!project && !!repo,
   });
   const prsQ = useQuery({
     queryKey: qk.codeReview.prs(projectId, project ?? "", repo ?? "", provider ?? ""),
@@ -122,23 +135,40 @@ export function ReviewTargetDialog({
   }, [branchesQ.data, mode, base]);
 
   const prepare = useMutation({
-    mutationFn: () =>
-      prepareReview(projectId, {
-        provider: provider ?? undefined,
-        mode,
-        ado_project: project!,
-        repo_name: repo!,
-        source_branch: mode === "branch" ? source! : undefined,
-        base_branch: mode === "branch" ? base! : undefined,
-        pr_id: mode === "pr" ? prId! : undefined,
-      }),
+    /** `wholeBranch` is the "review the whole branch instead" offer after an empty diff. */
+    mutationFn: (wholeBranch?: { branch: string }) =>
+      prepareReview(projectId, wholeBranch
+        ? {
+            provider: provider ?? undefined,
+            mode: "repo",
+            ado_project: project!,
+            repo_name: repo!,
+            source_branch: wholeBranch.branch,
+          }
+        : {
+            provider: provider ?? undefined,
+            mode,
+            ado_project: project!,
+            repo_name: repo!,
+            source_branch: mode === "branch" || mode === "repo" ? source! : undefined,
+            base_branch: mode === "branch" ? base! : undefined,
+            pr_id: mode === "pr" ? prId! : undefined,
+          }),
     onSuccess: (result) => {
-      toast.success(`Diff ready — ${result.files.length} file(s) changed`);
+      if (result.status === "no_changes") {
+        setNoChanges(result);
+        return;
+      }
+      toast.success(
+        result.mode === "repo"
+          ? `Branch ready — ${result.files.length} file(s) on ${result.source_branch}`
+          : `Diff ready — ${result.files.length} file(s) changed`,
+      );
       onPrepared(result);
       onOpenChange(false);
     },
     onError: (err) =>
-      toast.error("Couldn't prepare the diff", {
+      toast.error(mode === "repo" ? "Couldn't prepare the branch" : "Couldn't prepare the diff", {
         description: err instanceof Error ? err.message : undefined,
       }),
   });
@@ -146,7 +176,11 @@ export function ReviewTargetDialog({
   const canSubmit =
     !!project &&
     !!repo &&
-    (mode === "branch" ? !!source && !!base && source !== base : !!prId) &&
+    (mode === "branch"
+      ? !!source && !!base && source !== base
+      : mode === "repo"
+        ? !!source
+        : !!prId) &&
     !prepare.isPending;
 
   return (
@@ -155,20 +189,39 @@ export function ReviewTargetDialog({
         <DialogHeader>
           <DialogTitle className="font-display">Select a review target</DialogTitle>
           <DialogDescription>
-            Review a branch against a base, or an existing pull request. The repo is
-            cloned read-only — nothing is modified.
+            Review a branch against a base, an open pull request, or a whole branch — for new
+            code, or a change too small to judge the code by. The repo is cloned read-only;
+            nothing is modified.
           </DialogDescription>
         </DialogHeader>
 
         {/* Mode toggle */}
-        <div className="grid shrink-0 grid-cols-2 gap-2">
+        <div className="grid shrink-0 grid-cols-3 gap-2">
           <ModeButton active={mode === "branch"} onClick={() => setMode("branch")} icon={GitBranch}>
             Branch vs base
           </ModeButton>
           <ModeButton active={mode === "pr"} onClick={() => setMode("pr")} icon={GitPullRequest}>
             Open PR
           </ModeButton>
+          <ModeButton active={mode === "repo"} onClick={() => setMode("repo")} icon={FolderGit2}>
+            Whole branch
+          </ModeButton>
         </div>
+
+        {noChanges && (
+          <Callout tone="warning" title="Nothing to review in this diff" className="shrink-0">
+            <p>{noChanges.no_changes_reason}</p>
+            <Button
+              size="sm"
+              className="mt-2"
+              disabled={prepare.isPending}
+              onClick={() => prepare.mutate({ branch: noChanges.source_branch })}
+            >
+              <FolderGit2 className="size-4" aria-hidden />
+              Review the whole branch instead
+            </Button>
+          </Callout>
+        )}
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
           {/* ONLY WHEN THERE IS GENUINELY A CHOICE — a single-option picker is a
@@ -262,6 +315,22 @@ export function ReviewTargetDialog({
             </>
           )}
 
+          {project && repo && mode === "repo" && (
+            <Step label="Branch to review">
+              <CascadeList
+                sourceLabel={sourceLabel}
+                q={branchesQ}
+                value={source}
+                onChange={setSource}
+                getKey={(b) => `repo-${b.name}`}
+                getValue={(b) => b.name}
+                getLabel={(b) => b.name}
+                badge={(b) => (b.is_default ? "default" : undefined)}
+                emptyText={`${repo} has no branches.`}
+              />
+            </Step>
+          )}
+
           {project && repo && mode === "pr" && (
             <Step label="Open pull request">
               <CascadeList
@@ -289,13 +358,13 @@ export function ReviewTargetDialog({
             Cancel
           </Button>
           <Button
-            onClick={() => prepare.mutate()}
+            onClick={() => prepare.mutate(undefined)}
             disabled={!canSubmit}
             aria-busy={prepare.isPending}
             className="from-brand-gradient-from to-brand-gradient-to bg-gradient-to-br font-semibold text-white"
           >
             {prepare.isPending && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            {prepare.isPending ? "Preparing diff…" : "Prepare diff"}
+            {prepare.isPending ? "Preparing…" : mode === "repo" ? "Prepare branch" : "Prepare diff"}
           </Button>
         </DialogFooter>
       </DialogContent>

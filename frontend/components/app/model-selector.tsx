@@ -85,6 +85,32 @@ export function ModelSelector({
     return [...by.entries()];
   }, [options]);
 
+  // The offering to show: explicit choice → org default → first available.
+  const selectedId =
+    value && options.some((o) => o.offering_id === value)
+      ? value
+      : defaultOfferingId && options.some((o) => o.offering_id === defaultOfferingId)
+        ? defaultOfferingId
+        : options[0]?.offering_id;
+
+  // WHAT IS SHOWN IS WHAT RUNS. With no explicit choice this control DISPLAYS the org
+  // default (or the first option) but the page's value stayed undefined, so the run
+  // went out with no offering_id and the backend resolved its own default — which
+  // need not be the same offering. On a tenant whose backend default was an Azure
+  // offering with a dead key, a Testing run showing "xAI · grok-3-mini" died on
+  // AzureException. Report the resolved default once, so the page sends it.
+  //
+  // ABOVE THE EARLY RETURNS, and it must stay there. It sat below "Loading models…"
+  // once: the loading render ran two fewer hooks than the loaded one, React threw
+  // "Rendered more hooks than during the previous render", and every page with this
+  // picker went to the error screen on a fresh load.
+  const reportedDefault = React.useRef<string | undefined>(undefined);
+  React.useEffect(() => {
+    if (value || !selectedId || reportedDefault.current === selectedId) return;
+    reportedDefault.current = selectedId;
+    onValueChange(selectedId);
+  }, [value, selectedId, onValueChange]);
+
   const triggerCls = cn(
     "border-line-soft bg-surface-1 gap-2",
     compact ? "h-8 w-auto min-w-[210px] max-w-[340px] text-[12.5px]" : "w-full",
@@ -123,13 +149,6 @@ export function ModelSelector({
     );
   }
 
-  // The offering to show: explicit choice → org default → first available.
-  const selectedId =
-    value && options.some((o) => o.offering_id === value)
-      ? value
-      : defaultOfferingId && options.some((o) => o.offering_id === defaultOfferingId)
-        ? defaultOfferingId
-        : options[0]?.offering_id;
   const selectedOpt = selectedId
     ? options.find((o) => o.offering_id === selectedId)
     : undefined;

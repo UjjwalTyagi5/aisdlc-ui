@@ -332,7 +332,6 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     # MCP: bind this project's design-stage servers as tools for the duration of the
     # graph run (interactive-chat surface). project_id comes from pipeline_context;
     # absent project / disabled MCP -> no tools (no-op). Mirrors the pipeline path.
-    from shared.services.mcp_injection import mcp_tools_scope, project_stage_server_ids
     _project_id = pipeline_context.get("project_id") if isinstance(pipeline_context, dict) else None
     # Expose tenant/project/run to tool context so chat-generated design files (docx/ppt/
     # diagram) persist as project Artifact rows (shared.services.chat_artifacts).
@@ -340,12 +339,16 @@ async def _process_user_message_ws(message_data: dict, websocket: WebSocket, use
     set_tenant_id(tenant_id or None)
     set_project_id(_project_id)
     set_run_id(pipeline_context.get("run_id") if isinstance(pipeline_context, dict) else None)
-    _mcp_ids = await project_stage_server_ids(tenant_id or None, _project_id, "design")
     _design_skills = await resolve_agent_skills("design", tenant_id or None, _project_id)
 
+    # The stage's board connector, bound for this turn, plus the MCP tools this used
+    # to bind directly — `agent_run_scope`, as the Requirements and Development chats
+    # bind it. Without it `update_epic_state` answered "no project-management board
+    # is connected for this run" on a project with Azure DevOps connected.
+    from shared.services.agent_run import agent_run_scope  # noqa: PLC0415
     try:
-        async with mcp_tools_scope(
-            tenant_id or None, _mcp_ids, "design",
+        async with agent_run_scope(
+            agent_id="design", tenant_id=tenant_id or None, session_id=None,
             project_id=_project_id, owner_id=str(user_id) or None,
         ), skill_context_scope("design", _design_skills):
             async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
@@ -589,8 +592,12 @@ async def chat(
     start_ms = int(asyncio.get_event_loop().time() * 1000)
 
     _design_skills_rest = await resolve_agent_skills("design", None, _lf_pid)
+    from shared.services.agent_run import agent_run_scope  # noqa: PLC0415
     try:
-        async with skill_context_scope("design", _design_skills_rest):
+        async with agent_run_scope(
+            agent_id="design", tenant_id=str(real_tenant_id) or None, session_id=None,
+            project_id=_lf_pid, owner_id=str(real_user_id) or None,
+        ), skill_context_scope("design", _design_skills_rest):
             async for chunk in planning_app.astream(state, stream_mode="messages", config=config):
                 msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
                 if hasattr(msg_chunk, "content") and msg_chunk.content:

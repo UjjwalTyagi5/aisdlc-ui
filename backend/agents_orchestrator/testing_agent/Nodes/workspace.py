@@ -161,8 +161,9 @@ def _build_ado_remote_url(org_url: str, project: str, repo: str, pat: str) -> Op
     org = org_url.rstrip("/")
     if not org.startswith(("http://", "https://")):
         return None
-    project_seg = f"/{project}" if project else ""
-    return f"https://anything:{quote(pat)}@{org.split('://', 1)[1]}{project_seg}/_git/{repo}"
+    # Encoded like the PAT: ADO project and repo names can hold spaces and parentheses.
+    project_seg = f"/{quote(project, safe='')}" if project else ""
+    return f"https://anything:{quote(pat, safe='')}@{org.split('://', 1)[1]}{project_seg}/_git/{quote(repo, safe='')}"
 
 
 def _add_ado_remote_and_fetch_main(work_dir: str, ado_url: str) -> bool:

@@ -122,6 +122,12 @@ async def test_the_real_tool_loop_runs_semgrep_and_produces_a_persisted_review(v
     ]
     model = _ScriptedModel(script)
 
+    # submit_code_review refuses a review whose security scan has not run; this test is
+    # about the semgrep tool loop, so the scan is in place already.
+    from agents_orchestrator.code_review_agent.config.session_state import get_session
+    from config.ws_helper import get_session_id
+    get_session(get_session_id()).security = {"scanners": [], "totals": {}, "sbom": {"components": []}}
+
     # THE NODE RESOLVES A MODEL BEFORE IT BUILDS ONE, and this test predates that. The
     # agent gained a real `resolve_model_for_run` call — the fix for it silently falling
     # back to a dead ANTHROPIC_API_KEY while a valid Azure key sat configured — and that

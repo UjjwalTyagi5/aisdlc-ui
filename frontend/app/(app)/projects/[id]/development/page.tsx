@@ -26,6 +26,7 @@ import {
 
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RepoPickerDialog } from "@/components/app/repo-picker-dialog";
@@ -34,6 +35,7 @@ import { CodeViewer } from "@/components/app/code-viewer";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useDocumentView } from "@/hooks/use-open-document";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import {
@@ -49,8 +51,11 @@ import { qk } from "@/lib/api/query-keys";
 import { effectivePlatformRole } from "@/lib/auth/effective-role";
 import { tileStateFor } from "@/lib/agent-access";
 import { BUILT_AGENTS } from "@/lib/agents";
+import { getMyAgentAccess } from "@/lib/api/capabilities";
+import type { Involvement } from "@/lib/roles";
 import type { ChangeStatus } from "@/components/app/repo-file-tree";
 import type { DevPr, ProjectId } from "@/lib/schemas";
+import type { Phase } from "@/lib/schemas/enums";
 
 type LeftTab = "files" | "prs";
 
@@ -70,6 +75,14 @@ export default function DevelopmentPage() {
   const projectQ = useQuery({
     queryKey: qk.projects.detail(projectId),
     queryFn: () => getProject(projectId),
+  });
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(projectId);
+
+  const myAccessQ = useQuery({
+    queryKey: qk.myAgentAccess.forProject(projectId),
+    queryFn: () => getMyAgentAccess(projectId),
+    staleTime: 30_000,
   });
 
   const workspaceQ = useQuery({
@@ -191,7 +204,12 @@ export default function DevelopmentPage() {
   }
 
   const project = projectQ.data;
-  const tileState = role ? tileStateFor(role, "development", project.track, BUILT_AGENTS) : "locked";
+  // The API's answer for this viewer (extra agents included), the static table until
+  // it arrives — the same rule the overview's tiles follow.
+  const reach = myAccessQ.data?.reach as Partial<Record<Phase, Involvement>> | undefined;
+  const tileState = role
+    ? tileStateFor(role, "development", project.track, BUILT_AGENTS, reach)
+    : "locked";
   if (tileState === "locked" || tileState === "coming_soon") {
     return (
       <div className="mx-auto w-full max-w-lg p-6 md:p-10">
@@ -261,6 +279,8 @@ export default function DevelopmentPage() {
             projectId={projectId}
             stage="development"
             className="mb-4 shrink-0"
+            selectedId={docView.openId}
+            onSelect={docView.select}
           />
           {/* Segmented header */}
           <div className="flex items-center gap-1 border-b p-2">
@@ -350,7 +370,10 @@ export default function DevelopmentPage() {
 
         {/* Main pane — file viewer */}
         <main className="flex min-h-0 flex-col overflow-hidden">
-          {selectedFile ? (
+          {docView.openDoc ? (
+            <DocumentPreview artifact={docView.openDoc} project={project.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Development" className="min-h-0 flex-1 overflow-auto" />
+          ) : selectedFile ? (
             <>
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <span className="flex min-w-0 items-center gap-2">

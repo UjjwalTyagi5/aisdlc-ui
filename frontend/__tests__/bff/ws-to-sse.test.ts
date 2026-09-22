@@ -69,6 +69,18 @@ describe("mapWsToSseEvent", () => {
 
   // ── file_generated → artifact.updated ─────────────────────────────────────
   describe("file_generated", () => {
+    it("carries the document's own row id, which is what the page opens it by", () => {
+      // The synthetic artifactId is a chip key derived from the file name; the page view
+      // (GET /artifacts/{id}/page) needs the row the agent recorded.
+      const result = mapWsToSseEvent(
+        { type: "file_generated", filename: "last_BRD.docx", url: "/generated/last_BRD.docx", artifact_id: "row-9", session_id: "s1" },
+        RUN_ID,
+      );
+      expect(result && result.type === "artifact.updated" ? result.documentId : null).toBe("row-9");
+      const without = mapWsToSseEvent({ type: "file_generated", filename: "x.docx", session_id: "s1" }, RUN_ID);
+      expect(without && without.type === "artifact.updated" ? without.documentId : "x").toBeUndefined();
+    });
+
     it("maps file_generated to artifact.updated with status approved and passes StreamEvent.safeParse", () => {
       const wsMsg = {
         type: "file_generated",

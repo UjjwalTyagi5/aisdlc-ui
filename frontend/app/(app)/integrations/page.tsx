@@ -357,6 +357,10 @@ export default function IntegrationsPage() {
         tenantId,
         kind: k,
         name: KIND_LABEL[k],
+        // A placeholder tile for a connector the backend did not return. It says
+        // nothing about tooling either way, and `true` is the shape that greys out
+        // nothing — the real answer arrives with the real row.
+        agentToolsAvailable: true,
         installed: false,
         health: "disconnected",
         capabilities: [],

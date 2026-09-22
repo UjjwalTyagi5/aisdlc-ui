@@ -7,15 +7,11 @@ import contextvars
 import aiohttp
 import aiofiles
 import json
-from bs4 import BeautifulSoup, NavigableString, Tag
 from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_COLOR_INDEX
 from io import BytesIO
 from xhtml2pdf import pisa
 import textwrap
 import docx 
-import markdown
 from dotenv import load_dotenv
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import PyPDF2
@@ -37,6 +33,7 @@ from agents_orchestrator.requirements_agent.prompts.brd_prompt import BRDPROMPT
 from agents_orchestrator.requirements_agent.prompts.Pdd_prompt import PDDPROMPT
 from agents_orchestrator.requirements_agent.prompts.MOM_prompt import MoMPROMPT
 from agents_orchestrator.requirements_agent.prompts.risk_register_prompt import RISKPROMPT
+from agents_orchestrator.requirements_agent.prompts.prd_prompt import PRDPROMPT
 from agents_orchestrator.requirements_agent.prompts.User_stories_prompt import USERSTORYPROMPT
 from docxtpl import DocxTemplate, InlineImage, RichText
 import pickle
@@ -137,48 +134,131 @@ def _openai_generate(prompt: str, file_paths: list = None) -> str:
     return response.choices[0].message.content or ""
 
 
-async def _load_ref_paths(file_names: list) -> tuple:
-    paths = []
-    for name in file_names:
-        if isinstance(name, str) and name.startswith("Error:"):
+#: Per session: the files attached to the conversation, by the name the model is
+#: shown ("--- Attached file: NAME ---"). Filled by the chat handler each turn.
+_SESSION_SOURCES: dict[str, dict[str, str]] = {}
+
+
+def register_source_files(session_id: str, paths) -> None:
+    """Record this turn's attachments so a tool can find each one by its name."""
+    if not session_id:
+        return
+    known = _SESSION_SOURCES.setdefault(str(session_id), {})
+    for path in paths or []:
+        if isinstance(path, str) and path and os.path.isfile(path):
+            known[os.path.basename(path)] = path
+
+
+def _session_input_dir() -> str:
+    return os.path.abspath(f"{esett.FILES}/{get_user_id()}/requirements_agent/{get_session_id()}/input")
+
+
+def _unknown_source_error(name: str, attached: dict, approved: list) -> str:
+    shown = os.path.basename(name)
+    usable = sorted(attached) + sorted({d.get("title", "") for d in approved if d.get("title")})
+    if usable:
+        return (
+            f"Error: '{shown}' is neither attached to this conversation nor an approved "
+            f"document of this project. You can use: {', '.join(usable)}. Nothing was "
+            "generated — pass one of those names exactly."
+        )
+    return (
+        f"Error: '{shown}' is not attached to this conversation and the project has no "
+        "approved documents. Nothing was generated — ask the user to attach the file or "
+        "get a document approved first."
+    )
+
+
+async def _approved_documents() -> list:
+    """The project's approved documents this agent may read (metadata only)."""
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+    from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+    from shared.services.artifact_versions import readable_documents  # noqa: PLC0415
+
+    tenant_id, project_id = get_tenant_id(), get_project_id()
+    if not (tenant_id and project_id):
+        return []
+    async with get_db_session_for_tenant(str(tenant_id)) as db:
+        return list(await readable_documents(db, str(project_id)))
+
+
+async def _approved_document_path(doc: dict) -> tuple:
+    """Read an approved document through the gate that records the read, and write its
+    text into this session's input directory. Returns (path, None) or (None, error)."""
+    from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+    from shared.services.artifact_consumption import read_document_for_agent  # noqa: PLC0415
+
+    text, note = await read_document_for_agent(
+        tenant_id=str(get_tenant_id() or ""),
+        project_id=str(get_project_id() or ""),
+        artifact_id=str(doc["id"]),
+        consumer_stage="requirements",
+        consumer_run_id=get_session_id() or None,
+    )
+    title = doc.get("title") or str(doc["id"])
+    if text is None:
+        return None, f"Error: the approved document '{title}' could not be read: {note}. Nothing was generated."
+    folder = os.path.join(_session_input_dir(), "approved", str(doc["id"]))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{title}.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path, None
+
+
+async def _resolve_source_files(file_names) -> tuple:
+    """The on-disk paths for the files a tool was asked to read, or an error.
+
+    WHY BY NAME. A chat attachment reaches the model as its extracted text under
+    "--- Attached file: NAME ---" — the name is the only handle the model has. The
+    tools used to accept nothing but `.ref` files from upload_file, so
+    generate_brd(["transcript.md"]) answered "has not yet been uploaded" for a file the
+    user could see attached, and the turn ended with a BRD that was never written.
+
+    WHAT CAN BE READ, by name: files attached to THIS conversation, documents generated
+    in it, upload_file references inside this session's own input directory, and the
+    project's APPROVED documents (by file name or id — read through the gate that records
+    the read). Not an arbitrary server path — a model that names one gets the same error
+    as a model that names a file nobody attached.
+
+    WHY APPROVED DOCUMENTS TOO. "Create user stories from the approved BRD" left the model
+    one route: read the document, then re-type all of it into a tool argument. That call
+    timed out at 90 seconds, twice. Naming the document is the whole request.
+    """
+    attached = _SESSION_SOURCES.get(str(get_session_id() or ""), {})
+    approved: Optional[list] = None
+    paths: list = []
+    for raw in file_names or []:
+        if not isinstance(raw, str) or not raw.strip():
             continue
-        if os.path.exists(name):
-            try:
-                async with aiofiles.open(name, "r") as f:
-                    paths.append((await f.read()).strip())
-            except Exception:
-                continue
-        else:
-            return paths, f"Error: file {name} has not yet been uploaded"
+        name = raw.strip()
+        by_name = attached.get(os.path.basename(name))
+        if by_name and os.path.isfile(by_name):
+            paths.append(by_name)
+            continue
+        if name.endswith(".ref"):
+            ref = os.path.abspath(name)
+            if ref.startswith(_session_input_dir() + os.sep) and os.path.isfile(ref):
+                async with aiofiles.open(ref, "r") as fh:
+                    target = (await fh.read()).strip()
+                if os.path.isfile(target):
+                    paths.append(target)
+                    continue
+        if approved is None:
+            approved = await _approved_documents()
+        doc = next(
+            (d for d in approved if str(d.get("id")) == name or d.get("title") == os.path.basename(name)),
+            None,
+        )
+        if doc is not None:
+            path, err = await _approved_document_path(doc)
+            if err:
+                return [], err
+            paths.append(path)
+            continue
+        return [], _unknown_source_error(name, attached, approved)
     return paths, None
 
-
-def add_hyperlink(paragraph, text, url):
-    """
-    Adds a hyperlink to a paragraph.
- 
-    Args:
-        paragraph: The paragraph to add the hyperlink to.
-        text (str): The text to display for the link.
-        url (str): The URL the link should point to.
-    """
-    part = paragraph.part
-    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
-   
-    hyperlink = OxmlElement('w:hyperlink')
-    hyperlink.set(qn('r:id'), r_id)
-   
-    run = OxmlElement('w:r')
-    rPr = OxmlElement('w:rPr')
-    rStyle = OxmlElement('w:rStyle')
-    rStyle.set(qn('w:val'), 'Hyperlink')
-    rPr.append(rStyle)
-    run.append(rPr)
-    run.append(OxmlElement('w:t', text=text))
-   
-    hyperlink.append(run)
-    paragraph._p.append(hyperlink)
-    return hyperlink
 
 # Enhanced file_generated broadcast with file size
 async def broadcast_file_generated(session_id: str, filename: str, file_path: str):
@@ -190,163 +270,155 @@ async def broadcast_file_generated(session_id: str, filename: str, file_path: st
         # ({FILES}/{user_id}/requirements_agent/{session_id}/output) — the static mount
         # is /generated → FILES_DIR. The old "/orchestrator/" segment 404'd every download.
         file_url = f"{AGENTIC_BASE_URL}/generated/{user_id}/requirements_agent/{session_id}/output/{filename}"
+        # RECORDED FIRST, ANNOUNCED WITH ITS ID. The page opens the document by its
+        # artifact id (GET /artifacts/{id}/page) — the row has to exist, and the
+        # announcement has to name it, before the page hears about the file.
+        artifact_id = None
+        try:
+            from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+            artifact_id = await register_generated_file(filename, file_path, file_url, stage="requirements")
+        except Exception as _art_exc:  # noqa: BLE001
+            print(f"DEBUG: register_generated_file failed: {_art_exc}")
         await manager.broadcast({
             "type": "file_generated",
             "session_id": session_id,
             "filename": filename,
             "url": file_url,
+            "artifact_id": artifact_id,
             "file_size": file_size,
             "message": f"Generated file: {filename}"
         })
 
         print(f"DEBUG: Broadcasted file generation: {filename} ({file_size} bytes)")
-        # Also persist as a project Artifact row so the file shows in the artifacts panel,
-        # not only as a live in-chat download (best-effort; never blocks generation).
-        try:
-            from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
-            await register_generated_file(filename, file_path, file_url, stage="requirements")
-        except Exception as _art_exc:  # noqa: BLE001
-            print(f"DEBUG: register_generated_file failed: {_art_exc}")
         return file_url
     except Exception as e:
         print(f"ERROR: Failed to broadcast file generation: {str(e)}")
         return ""
 
-async def markdown_to_docx(markdown_string: str, docx_path: str):
-    """
-    Converts a Markdown or HTML string to a DOCX file with near-full feature support.
-    Now async to allow for real-time updates.
-    """
-    # Import OXML elements here to keep the function self-contained
-    from docx.oxml.shared import OxmlElement
-    from docx.oxml.ns import qn
- 
-    print(f"Starting markdown to docx conversion for: {docx_path}")
-    dedented_markdown = textwrap.dedent(markdown_string).strip()
-    doc = Document()
-    # Enable all necessary extensions for full feature support
-    html = markdown.markdown(dedented_markdown, extensions=['extra', 'sane_lists', 'tables', 'fenced_code', 'codehilite'])
-    soup = BeautifulSoup(html, 'html.parser')
- 
-    def _add_inline_content(paragraph, element: Tag):
-        """Recursively adds formatted runs to a paragraph."""
-        for child in element.children:
-            if isinstance(child, NavigableString):
-                if child.strip():
-                    run = paragraph.add_run(child)
-                    curr = child.parent
-                    # Apply formatting from parent tags
-                    while curr is not None and curr.name != element.name:
-                        if curr.name in ['strong', 'b']: run.bold = True
-                        if curr.name in ['em', 'i']: run.italic = True
-                        if curr.name in ['s', 'del']: run.strike = True
-                        if curr.name == 'code':
-                            run.font.name = 'Courier New'
-                        curr = curr.parent
-            elif isinstance(child, Tag):
-                if child.name == 'br':
-                    paragraph.add_run().add_break()
-                elif child.name == 'a':
-                    add_hyperlink(paragraph, child.get_text(), child.get('href'))
-                else:
-                    _add_inline_content(paragraph, child)
+async def _write_designed_docx(markdown: str, docx_path: str) -> str:
+    """Render `markdown` as the designed Word document at `docx_path` and write its
+    markdown beside it (`<name>.md`, what the Requirements page renders). Raises on any
+    failure — see requirements_document.py for the canvas."""
+    from agents_orchestrator.requirements_agent.requirements_document import (  # noqa: PLC0415
+        RequirementsDocMeta,
+        document_kind,
+        render_requirements_docx,
+        source_names,
+        title_for,
+        today,
+        write_markdown_sibling,
+    )
 
-    async def _parse_element(element, doc, list_info=None):
-        """Recursively parses a BeautifulSoup element and adds it to the document."""
-        if not hasattr(element, 'name') or element.name is None: 
-            return
- 
-        if element.name in [f'h{i}' for i in range(1, 7)]:
-            level = int(element.name[1])
-            p = doc.add_heading(level=level)
-            _add_inline_content(p, element)
-            print(f"Added heading level {level}")
-            await asyncio.sleep(0.001)  # Allow other tasks to run
-        elif element.name == 'p':
-            p = doc.add_paragraph()
-            _add_inline_content(p, element)
-            print("Added paragraph")
-            await asyncio.sleep(0.001)
-        elif element.name in ['ul', 'ol']:
-            list_style = 'List Bullet' if element.name == 'ul' else 'List Number'
-            parent_level = list_info[1] if list_info else -1
-            for li in element.find_all('li', recursive=False):
-                await _parse_element(li, doc, list_info=(list_style, parent_level + 1))
-        elif element.name == 'li':
-            if list_info:
-                style, level = list_info
-                p = doc.add_paragraph(style=style)
-                p.paragraph_format.left_indent = Inches(0.5 * level)
-                _add_inline_content(p, element)
-                for nested_list in element.find_all(['ul', 'ol'], recursive=False):
-                    await _parse_element(nested_list, doc, list_info)
-                print(f"Added list item at level {level}")
-                await asyncio.sleep(0.001)
-        elif element.name == 'table':
-            rows_data = element.find_all('tr')
-            if not rows_data: return
-            num_cols = len(rows_data[0].find_all(['th', 'td']))
-            table = doc.add_table(rows=len(rows_data), cols=num_cols)
-            table.style = 'Table Grid'
-            for i, row_element in enumerate(rows_data):
-                cells = row_element.find_all(['th', 'td'])
-                for j, cell_element in enumerate(cells):
-                    p = table.cell(i, j).paragraphs[0]
-                    _add_inline_content(p, cell_element)
-            print(f"Added table with {len(rows_data)} rows and {num_cols} columns")
-            await asyncio.sleep(0.001)
-        elif element.name == 'img':
-            src = element.get('src')
-            if src:
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(src) as response:
-                            if response.status == 200:
-                                image_data = await response.read()
-                                doc.add_picture(BytesIO(image_data), width=Inches(5.0))
-                                print(f"Added image from {src}")
-                            else:
-                                print(f"Warning: Could not fetch image from {src}. Status: {response.status}")
-                                doc.add_paragraph(f"[Image not found: {src}]").add_run().italic = True
-                except Exception as e:
-                    print(f"Warning: Could not fetch image from {src}. Error: {e}")
-                    doc.add_paragraph(f"[Image not found: {src}]").add_run().italic = True
-        elif element.name == 'hr':
-            doc.add_page_break()
-            print("Added page break")
-            await asyncio.sleep(0.001)
-        elif element.name == 'blockquote':
-            p = doc.add_paragraph(style='Quote')
-            p.paragraph_format.left_indent = Inches(0.5)
-            for child in element.children:
-                await _parse_element(child, doc)
-            print("Added blockquote")
-            await asyncio.sleep(0.001)
-        elif element.name == 'pre':
-            code_text = element.get_text()
-            p = doc.add_paragraph(style='No Spacing')
-            run = p.add_run(code_text)
-            run.font.name = 'Courier New'
-            run.font.size = Pt(10)
-            print("Added code block")
-            await asyncio.sleep(0.001)
- 
-    # Process all top-level tags from the parsed HTML
-    for element in soup.contents:
-        await _parse_element(element, doc)
-    
+    dedented = textwrap.dedent(markdown or "").strip()
+    filename = os.path.basename(docx_path)
+    kind = document_kind(dedented, filename)
+    project = await _project_display_name()
+    meta = RequirementsDocMeta(
+        title=title_for(dedented, filename, kind, project),
+        kind=kind,
+        project=project,
+        sources=source_names(_LAST_SOURCE_FILES.get(get_session_id(), [])),
+        generated_on=today(),
+    )
+    os.makedirs(os.path.dirname(docx_path) or ".", exist_ok=True)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: render_requirements_docx(dedented, docx_path, meta=meta))
+    # The page's copy. NOT best-effort: a Word file the page cannot show is half a
+    # delivery, and the failure belongs in the tool's answer, not a print.
+    write_markdown_sibling(dedented, docx_path)
+    return docx_path
+
+
+async def markdown_to_docx(markdown_string: str, docx_path: str) -> str:
+    """Write the designed Word document and announce it — or say that it was not.
+
+    Every exit is either the real download link or an "Error:". It used to answer
+    "Successfully converted Markdown to X" when the announcement had failed and there
+    was no link to give, which is exactly the reply a model turns into "your document is
+    ready" and a link it writes itself.
+    """
+    from shared.tools.doc_export import export_result_message  # noqa: PLC0415
+
+    filename = os.path.basename(docx_path)
     try:
-        session_id = get_session_id()
-        print(f"Saving document to {docx_path}")
-        doc.save(docx_path)
-        filename = os.path.basename(docx_path)
-        _url = await broadcast_file_generated(session_id, filename, docx_path)
-        print(f"Successfully saved document to {docx_path}")
-        if _url:
-            return f"Saved '{filename}'. Download it here: {_url}"
-    except Exception as e:
-        print(f"An exception occurred while saving the doc file: {e}")
-    return f"Successfully converted Markdown to {os.path.basename(docx_path)}"
+        await _write_designed_docx(markdown_string, docx_path)
+    except Exception as exc:  # noqa: BLE001
+        broadcast_log(manager, f"Word document not written: {type(exc).__name__}", level="ERROR")
+        return (
+            f"Error: the Word document '{filename}' could not be written ({type(exc).__name__}). "
+            "Nothing was generated — tell the user."
+        )
+    url = await broadcast_file_generated(get_session_id(), filename, docx_path)
+    return export_result_message(filename, url)
+
+
+def _unique_output_name(out_dir: str, stem: str, ext: str = ".docx") -> str:
+    """`stem.docx`, or `stem_v2.docx`, `stem_v3.docx` … — a second BRD in the same
+    conversation must not overwrite the first one the user may already have opened."""
+    name = f"{stem}{ext}"
+    n = 2
+    while os.path.exists(os.path.join(out_dir, name)):
+        name = f"{stem}_v{n}{ext}"
+        n += 1
+    return name
+
+
+async def _save_generated_document(markdown: str, suffix: str) -> str:
+    """Write a generated BRD / PDD / risk register as its Word document, and return
+    what the model should know: the real link, then the content for follow-ups.
+
+    WHY THE GENERATOR SAVES. Generating and saving were two tool calls, and the second
+    was the model's to remember. A turn that skipped it — or whose generation had failed
+    — still ended "BRD Generated Successfully" with a link the model invented. A
+    generated document now IS a file, with a link, or the tool says it is not.
+    """
+    import re as _re  # noqa: PLC0415
+
+    project = await _project_display_name()
+    stem = (_re.sub(r"[^A-Za-z0-9]+", "_", project or "").strip("_") or "Requirements") + f"_{suffix}"
+    out_dir = f"{esett.FILES}/{get_user_id()}/requirements_agent/{get_session_id()}/output"
+    os.makedirs(out_dir, exist_ok=True)
+    name = _unique_output_name(out_dir, stem)
+    docx_path = os.path.join(out_dir, name)
+    result = await markdown_to_docx(markdown, docx_path)
+    if result.startswith("Error:"):
+        return result
+    # "Now create user stories from that BRD": the document is a source by its name for
+    # the rest of this conversation — its markdown, not the Word file, is what is read.
+    _SESSION_SOURCES.setdefault(str(get_session_id() or ""), {})[name] = os.path.splitext(docx_path)[0] + ".md"
+    return (
+        f"{result}\n"
+        "This Word document IS the deliverable and it is shown on the Requirements page. "
+        "Do not call export_document or markdowntodoc to make another Word copy; use "
+        "export_document only if the user asks for a different format.\n\n"
+        "--- DOCUMENT CONTENT (for follow-up questions; do not paste it back in full) ---\n"
+        f"{markdown}"
+    )
+
+
+async def _project_display_name() -> str:
+    """The project's display name for the document's title band, or ""."""
+    try:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from config.ws_helper import get_project_id, get_tenant_id  # noqa: PLC0415
+        from shared.db import get_db_session_for_tenant  # noqa: PLC0415
+        from shared.models.orm import Project  # noqa: PLC0415
+
+        project_id, tenant_id = get_project_id(), get_tenant_id()
+        if not (project_id and tenant_id):
+            return ""
+        async with get_db_session_for_tenant(tenant_id) as db:
+            project = await db.get(Project, _uuid.UUID(str(project_id)))
+            return (getattr(project, "display_name", "") or "") if project else ""
+    except Exception:  # noqa: BLE001 — a blank fact, never a lost document
+        return ""
+
+
+#: Per session: the uploaded files the last document was generated from — the
+#: document's "Source" fact. Set by generate_brd / generate_pdd / generate_risk_register.
+_LAST_SOURCE_FILES: dict = {}
+
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
@@ -429,6 +501,13 @@ async def delete_file(file_name: str):
 _LAST_GENERATED_DOC: dict[str, str] = {}
 
 
+def _remember_sources(file_paths) -> None:
+    try:
+        _LAST_SOURCE_FILES[get_session_id()] = list(file_paths or [])
+    except Exception:
+        pass
+
+
 def _remember_doc(content: str) -> None:
     try:
         _LAST_GENERATED_DOC[get_session_id()] = content
@@ -444,11 +523,11 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
  
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional instructions needed based on users query, can be empty
     """
     broadcast_log(manager, f"---Executing tool: generate_brd for files: {file_names}---", level="INFO")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     # Files are optional: generate from the user's description (custom_prompt) alone when
@@ -456,6 +535,7 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the BRD should cover, or upload a source file."
     prompt = BRDPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         broadcast_log(manager, "Generating BRD content...", level="INFO")
         loop = asyncio.get_event_loop()
@@ -463,11 +543,41 @@ async def generate_brd(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         broadcast_log(manager, "BRD generation completed", level="INFO")
         _remember_doc(response)
-        return response
     except Exception as e:
         error_msg = _classify_error(e, "BRD generation")
         broadcast_log(manager, error_msg, level="ERROR")
         return error_msg
+    return await _save_generated_document(response, "BRD")
+
+@tool
+async def generate_prd(file_names: List[str], custom_prompt: str):
+    """
+    Generates a Product Requirements Document (PRD) — the product to build: users,
+    features, functional and non-functional requirements, success metrics, release plan —
+    and writes it as a Word document with its download link.
+
+    Args:
+        file_names (List[str]): Sources: files attached to this conversation, documents
+                                generated in it, or the project's APPROVED documents
+                                (e.g. "TEST_Project_BRD.docx"), by exact name.
+        custom_prompt (str): Additional instructions based on the user's query, can be empty
+    """
+    broadcast_log(manager, f"---Executing tool: generate_prd for files: {file_names}---", level="INFO")
+    file_paths, err = await _resolve_source_files(file_names)
+    if err:
+        return err
+    if not file_paths and not (custom_prompt and custom_prompt.strip()):
+        return "Error: Provide a description of what the PRD should cover, or name a source document."
+    prompt = PRDPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
+    try:
+        loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
+        response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
+        _remember_doc(response)
+    except Exception as e:
+        return _classify_error(e, "PRD generation")
+    return await _save_generated_document(response, "PRD")
 
 @tool
 async def generate_pdd(file_names: List[str], custom_prompt: str):
@@ -477,16 +587,17 @@ async def generate_pdd(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print(f"Executing tool: generate_pdd for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the PDD should cover, or upload a source file."
     prompt = PDDPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         print("Generating PDD content...")
         loop = asyncio.get_event_loop()
@@ -494,9 +605,9 @@ async def generate_pdd(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         print("PDD generation completed")
         _remember_doc(response)
-        return response
     except Exception as e:
         return _classify_error(e, "PDD generation")
+    return await _save_generated_document(response, "PDD")
 
 @tool
 async def generate_risk_register(file_names: List[str], custom_prompt: str):
@@ -506,16 +617,17 @@ async def generate_risk_register(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print("Executing tool: generate_risk_register for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths and not (custom_prompt and custom_prompt.strip()):
         return "Error: Provide a description of what the Risk Register should cover, or upload a source file."
     prompt = RISKPROMPT.format(custom_prompt=custom_prompt)
+    _remember_sources(file_paths)
     try:
         print("Generating Risk Register content...")
         loop = asyncio.get_event_loop()
@@ -523,9 +635,9 @@ async def generate_risk_register(file_names: List[str], custom_prompt: str):
         response = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
         print("Risk Register generation completed")
         _remember_doc(response)
-        return response
     except Exception as e:
         return _classify_error(e, "Risk Register generation")
+    return await _save_generated_document(response, "Risk_Register")
 
 @tool
 async def template_pdd(content: str, files: List[str], filename : str = "template_pdd.docx"):
@@ -533,10 +645,10 @@ async def template_pdd(content: str, files: List[str], filename : str = "templat
         This function also saves the document it generates
     Args:
         content (str) : The content from which the PDD template fields will be extracted, if file is provided can be empty
-        files (List[str]) : A list of file names to analyze These names must be obtained from the upload_file tool
+        files (List[str]) : A list of file names to analyze Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         filename (str) : The filename for saving, should be of the format project_topic_template_pdd.docx
     """
-    file_paths, err = await _load_ref_paths(files)
+    file_paths, err = await _resolve_source_files(files)
     if err:
         return err
 
@@ -749,7 +861,7 @@ async def update_response(file_names: List[str], query: str, content: str):
     content (str): the actual content that needs to be updated
     """
     print(f"Executing tool: update_response for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     prompt = f"""Given the following content and attached files as context update the content provided to you based on the query
@@ -778,11 +890,11 @@ async def generate_mom(file_names: List[str], custom_prompt: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         custom_prompt (str): Additional special instructions to be taken into consideration while generating the PDD
     """
     print("Executing tool: generate_mom for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -806,11 +918,11 @@ async def general_query(file_names: List[str], query: str):
    
     Args:
         file_names (List[str]): A list of file names to analyze
-                                These names must be obtained from the upload_file tool
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
         query (str): the users query
     """
     print(f"Executing tool: general_query for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -832,11 +944,11 @@ async def generate_user_stories(file_names: List[str], custom_prompt: str = ""):
     which can include BRDs, meeting notes, requirements documents, or customer feedback.
     Args:
     file_names (List[str]): A list of file names to analyze
-    These names must be obtained from the upload_file tool
+    Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'
     custom_prompt (str): Additional special instructions for user story generation
     """
     broadcast_log(manager, f"---Executing tool: generate_user_stories for files: {file_names}---", level="INFO")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -901,12 +1013,12 @@ async def generate_planning_sheet(file_names: List[str], custom_prompt: str = ""
     This Function automatically saves the planning sheet
     Args:
         file_names (List[str]): A list of file names to analyze.
-                                These names must be obtained from the upload_file tool.
+                                Names of files attached to this conversation, exactly as shown in '--- Attached file: NAME ---'.
         custom_prompt (str): Additional instructions for the model, can be empty.
         filename (str): filename for saving, should be of the format project_topic_planning_sheet.xlsx
     """
     print(f"---Executing tool: generate_planning_sheet for files: {file_names}---")
-    file_paths, err = await _load_ref_paths(file_names)
+    file_paths, err = await _resolve_source_files(file_names)
     if err:
         return err
     if not file_paths:
@@ -1446,12 +1558,9 @@ async def markdowntopdf(content: str = "", output_path: str = "requirements_docu
         return f"Error generating the PDF ({type(exc).__name__})."
 
     url = await broadcast_file_generated(session_id, filename, full_path)
-    return (
-        f"Generated '{filename}'."
-        + (f" Download it here: {url}" if url else "")
-        + " It is NOT yet saved to the project's artifacts — ask the user whether to "
-          "It is awaiting a project admin's approval."
-    )
+    from shared.tools.doc_export import export_result_message  # noqa: PLC0415
+
+    return export_result_message(filename, url)
 
 
 
@@ -1497,7 +1606,12 @@ async def export_document(content: str = "", filename: str = "requirements_docum
     full_path = os.path.join(out_dir, name)
 
     try:
-        await render_document(content, full_path, title=name.rsplit(".", 1)[0])
+        if name.lower().endswith(".docx"):
+            # The same designed document generate_brd writes, with the page's copy
+            # beside it — not the generic converter, which the page cannot render.
+            await _write_designed_docx(content, full_path)
+        else:
+            await render_document(content, full_path, title=name.rsplit(".", 1)[0])
     except ValueError:
         # render_document refuses an extension it has no renderer for. Its message is
         # ours, not a connector's, but the sweep in test_board_write_failures cannot
@@ -2052,7 +2166,7 @@ async def delete_board_item(project: str, work_item_id: str, provider: str = "")
 
 
 @tool
-async def normalize_acceptance_criteria(stories_json: str) -> str:
+async def normalize_acceptance_criteria(stories_json: str = "") -> str:
     """Rewrite raw acceptance criteria from board stories into Gherkin Given/When/Then.
 
     Call after fetch_board_item_detail / fetch_board_hierarchy (or with the
@@ -2061,11 +2175,21 @@ async def normalize_acceptance_criteria(stories_json: str) -> str:
 
     Args:
         stories_json: JSON array of stories — each with "id", "title", and
-            "acceptance_criteria" (list of raw strings).
+            "acceptance_criteria" (list of raw strings). Omit it to normalise the stories
+            generated in this conversation (they are updated in place, epics kept).
 
     Returns a JSON array with the same stories but acceptance_criteria replaced
     with normalised Gherkin scenarios.
     """
+    from_session = not (stories_json and stories_json.strip())
+    if from_session:
+        remembered = _session_stories()
+        if not remembered:
+            return (
+                "Error: no stories were generated in this conversation, and no stories_json "
+                "was given. Generate or fetch stories first."
+            )
+        stories_json = json.dumps(remembered["stories"])
     prompt = f"""You are a senior QA engineer. Produce complete, testable acceptance criteria
 in Gherkin format (Given/When/Then) for each user story.
 
@@ -2090,11 +2214,25 @@ Return a JSON array. Each element:
 No markdown. Only valid JSON."""
     loop = asyncio.get_event_loop()
     ctx = contextvars.copy_context()
-    return await loop.run_in_executor(None, ctx.run, _openai_generate, prompt)
+    text = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt)
+    if from_session:
+        normalised = _parse_stories(text)
+        if normalised is None:
+            return "Error: the model did not return the normalised stories as JSON; nothing was changed. Ask again."
+        remembered = _session_stories()
+        originals = remembered["stories"]
+        by_title = {str(o.get("title", "")).strip(): o for o in originals}
+        merged = []
+        for i, story in enumerate(normalised["stories"]):
+            original = by_title.get(str(story.get("title", "")).strip()) or (originals[i] if i < len(originals) else {})
+            merged.append({**original, **story, "epic": story.get("epic") or original.get("epic", "")})
+        remembered["stories"] = merged
+        return json.dumps(merged, indent=2)
+    return text
 
 
 @tool
-async def detect_requirement_gaps(stories_json: str) -> str:
+async def detect_requirement_gaps(stories_json: str = "") -> str:
     """Analyse stories and detect gaps, ambiguities, and missing NFRs before design.
 
     Use after fetching/normalising stories to ensure requirements are complete before
@@ -2103,10 +2241,19 @@ async def detect_requirement_gaps(stories_json: str) -> str:
 
     Args:
         stories_json: JSON array of stories with title, description, and
-            acceptance_criteria fields.
+            acceptance_criteria fields. Omit it to check the stories generated in this
+            conversation.
 
     Returns a structured gap report (JSON) with actionable follow-up questions.
     """
+    if not (stories_json and stories_json.strip()):
+        remembered = _session_stories()
+        if not remembered:
+            return (
+                "Error: no stories were generated in this conversation, and no stories_json "
+                "was given. Generate or fetch stories first."
+            )
+        stories_json = json.dumps(remembered["stories"])
     prompt = f"""You are a senior business analyst reviewing user stories before system design begins.
 
 CRITICAL RULES — read before analysing:
@@ -2160,16 +2307,66 @@ No markdown, no extra text. Only valid JSON."""
     return await loop.run_in_executor(None, ctx.run, _openai_generate, prompt)
 
 
+#: Per session: the epics + stories generated in this conversation, so normalising,
+#: gap-checking and writing them to the board name them instead of re-typing the JSON.
+_LAST_STORIES: dict[str, dict] = {}
+
+
+def _session_stories() -> Optional[dict]:
+    return _LAST_STORIES.get(str(get_session_id() or ""))
+
+
+def _parse_stories(text: str) -> Optional[dict]:
+    """{"epics": [...], "stories": [...]} from a model reply, or None."""
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw[raw.find("\n") + 1:] if "\n" in raw else raw
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(data, list):
+        data = {"epics": [], "stories": data}
+    if not isinstance(data, dict) or not isinstance(data.get("stories"), list):
+        return None
+    data.setdefault("epics", [])
+    return data
+
+
 @tool
-async def generate_stories_from_brd(brd_content: str, project_context: str = "") -> str:
-    """Generate INVEST user stories + Gherkin AC directly from BRD / requirements text.
+async def generate_stories_from_brd(
+    source_documents: Optional[List[str]] = None, brd_content: str = "", project_context: str = "",
+) -> str:
+    """Generate epics and INVEST user stories with Gherkin AC from a requirements document.
+
+    NAME THE DOCUMENT — do not paste it. Pass the BRD (or other requirements document) in
+    `source_documents` by exact name: a file attached to this conversation, a document
+    generated in it, or one of the project's APPROVED documents (e.g.
+    "TEST_Project_BRD.docx"). The document is read server-side. Use `brd_content` only for
+    text the user typed into the chat.
+
+    The stories are remembered for this conversation: normalize_acceptance_criteria,
+    detect_requirement_gaps and write_stories_to_board use them when called without
+    stories_json.
 
     Args:
-        brd_content: Full BRD / requirements document text.
+        source_documents: Names (or approved-document ids) to generate from.
+        brd_content: Requirements text typed by the user, when there is no document.
         project_context: Optional project name, tech stack, or constraints.
 
     Returns JSON with "epics" (grouped stories) and "stories" (flat INVEST list with AC).
     """
+    file_paths, err = await _resolve_source_files(source_documents or [])
+    if err:
+        return err
+    if not file_paths and not (brd_content and brd_content.strip()):
+        return (
+            "Error: nothing to generate stories from. Name the requirements document in "
+            "source_documents (an attachment, a document generated here, or an approved "
+            "project document), or give the requirements text."
+        )
+    brd_content = brd_content or "(the attached source document(s) above)"
     prompt = f"""You are a senior business analyst. Analyse the BRD below and extract all functional requirements.
 For each requirement produce a user story and acceptance criteria.
 
@@ -2187,24 +2384,37 @@ Return a single JSON object:
 No markdown. Only valid JSON."""
     loop = asyncio.get_event_loop()
     ctx = contextvars.copy_context()
-    return await loop.run_in_executor(None, ctx.run, _openai_generate, prompt)
+    text = await loop.run_in_executor(None, ctx.run, _openai_generate, prompt, file_paths)
+    stories = _parse_stories(text)
+    if stories is None:
+        return (
+            "Error: the model did not return stories as JSON, so nothing was recorded for this "
+            "conversation. Ask again."
+        )
+    _LAST_STORIES[str(get_session_id() or "")] = stories
+    return json.dumps(stories, indent=2)
 
 
 @tool
 async def write_stories_to_board(
-    stories_json: str,
-    project: str,
+    stories_json: str = "",
+    project: str = "",
     work_item_type: str = "User Story",
     parent_id: str = "",
     provider: str = "",
+    create_epics: bool = False,
+    epic_type: str = "Epic",
 ) -> str:
     """Create generated user stories as NEW work items on the board (bulk create).
 
     Args:
-        stories_json: JSON array of stories (from generate_stories_from_brd /
-            generate_user_stories). Each story needs at least a "title"; optional
-            "description" and "acceptance_criteria" (list).
+        stories_json: JSON array of stories (from generate_user_stories, or pasted by the
+            user). OMIT IT to write the epics and stories generated in this conversation by
+            generate_stories_from_brd — never re-type those.
         project: Board project name to create the stories in.
+        create_epics: True to create each Epic first and put every story UNDER its epic
+            (the story's "epic" field). Cannot be combined with parent_id.
+        epic_type: The work item type for the epics. Defaults to "Epic".
         work_item_type: The type to create. Defaults to "User Story", which does NOT
             exist on every board — an Azure DevOps Basic project has Epic/Issue/Task
             and a Scrum one has Product Backlog Item. Call list_board_item_types when
@@ -2219,22 +2429,66 @@ async def write_stories_to_board(
     (e.g. "ado" or "jira"). Omit it to use the stage's default board. Call
     list_board_providers first if you are unsure which are available.
     """
+    if create_epics and parent_id:
+        return (
+            "Error: create_epics puts each story under its own epic, and parent_id puts them "
+            "all under one item — choose one. Nothing was created."
+        )
+    if not (project and project.strip()):
+        return "Error: name the board project to create the stories in. Nothing was created."
     connector, err = await _board_connector("write", provider)
     if err:
         return f"Error: {err}"
-    try:
-        stories = json.loads(stories_json)
-        if isinstance(stories, dict) and "stories" in stories:
-            stories = stories["stories"]
-    except Exception as exc:  # noqa: BLE001
-        return f"Error parsing stories JSON: {exc}"
+    epics_meta: list = []
+    if stories_json and stories_json.strip():
+        try:
+            stories = json.loads(stories_json)
+            if isinstance(stories, dict) and "stories" in stories:
+                epics_meta = stories.get("epics") or []
+                stories = stories["stories"]
+        except Exception as exc:  # noqa: BLE001
+            return f"Error parsing stories JSON: {exc}"
+    else:
+        remembered = _session_stories()
+        if not remembered:
+            return (
+                "Error: no stories were generated in this conversation, and no stories_json "
+                "was given. Generate the stories first. Nothing was created."
+            )
+        stories, epics_meta = remembered["stories"], remembered.get("epics") or []
 
-    created, failed = [], []
-    for s in stories:
-        title = (s.get("title") or "").strip()
+    epic_ids: dict = {}
+    epic_lines, created, failed, skipped = [], [], [], []
+    if create_epics:
+        order = [str(e.get("epic_title", "")).strip() for e in epics_meta if isinstance(e, dict)]
+        order += [str(s_.get("epic", "")).strip() for s_ in stories if isinstance(s_, dict)]
+        described = {str(e.get("epic_title", "")).strip(): e.get("epic_description", "") for e in epics_meta if isinstance(e, dict)}
+        used = {str(s_.get("epic", "")).strip() for s_ in stories if isinstance(s_, dict)}
+        for title in dict.fromkeys(t for t in order if t and t in used):
+            try:
+                wi = await connector.write_adapter(
+                    "create_item", project=project, item_type=epic_type, title=title,
+                    description=described.get(title, ""), acceptance_criteria="", parent_id="",
+                )
+                epic_ids[title] = str(wi["id"])
+                epic_lines.append(f"#{wi['id']} {title}")
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"Epic '{title}': {_board_error(exc)}")
+
+    for s_ in stories:
+        title = (s_.get("title") or "").strip()
         if not title:
             continue
-        ac_lines = s.get("acceptance_criteria", [])
+        parent = parent_id
+        if create_epics:
+            epic = str(s_.get("epic", "")).strip()
+            if epic and epic not in epic_ids:
+                # Its epic was not created; a story silently left unparented is not what
+                # was asked for.
+                skipped.append(f"{title} (its epic '{epic}' was not created)")
+                continue
+            parent = epic_ids.get(epic, "")
+        ac_lines = s_.get("acceptance_criteria", [])
         ac_html = "<br>".join(ac_lines) if isinstance(ac_lines, list) else str(ac_lines)
         try:
             wi = await connector.write_adapter(
@@ -2242,15 +2496,19 @@ async def write_stories_to_board(
                 project=project,
                 item_type=work_item_type,
                 title=title,
-                description=s.get("description", ""),
+                description=s_.get("description", ""),
                 acceptance_criteria=ac_html,
-                parent_id=parent_id,
+                parent_id=parent,
             )
-            created.append(f"#{wi['id']} {title}")
+            created.append(f"#{wi['id']} {title}" + (f" (child of #{parent})" if parent else ""))
         except Exception as exc:  # noqa: BLE001
             failed.append(f"{title}: {_board_error(exc)}")
-
-    lines = [f"Created {len(created)} work item(s):"] + created
+    lines = []
+    if create_epics:
+        lines += [f"Created {len(epic_lines)} epic(s):"] + epic_lines
+    lines += [f"Created {len(created)} work item(s):"] + created
+    if skipped:
+        lines += [f"\nNot created ({len(skipped)}):"] + skipped
     if failed:
         lines += [f"\nFailed ({len(failed)}):"] + failed
     return "\n".join(lines)
@@ -2475,12 +2733,30 @@ try:
 except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
     _DOCUMENT_TOOLS = []
 
+#: "Send it for approval" from the chat: the same act as the Documents panel's button,
+#: with the signed-in user's permission. See shared/tools/document_approval.py.
+from shared.tools.document_approval import make_approval_tools  # noqa: E402
+
+_APPROVAL_TOOLS = make_approval_tools("requirements")
+
 #: Bound to THIS agent and THIS stage. The connector resolves its access level
 #: against `agent_id`, and `stage` decides which documents belong to this screen —
 #: both come from here, never from a tool argument the model could set.
 _SHAREPOINT_TOOLS = make_sharepoint_tools(agent_id="requirements", stage="requirements")
 
-tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
+try:
+    from shared.tools.confluence_artifacts import make_confluence_tools  # noqa: PLC0415
+
+    # THE SAME CAPABILITY, FOR THE OTHER DOCUMENT SYSTEM, bound the same way. Asked to
+    # file an approved document to Confluence, an agent holding only the SharePoint
+    # tools answers that the platform "only publishes to SharePoint" — truthfully, and
+    # wrongly, because the connector could do it all along and nothing bound it here.
+    _CONFLUENCE_TOOLS = make_confluence_tools(agent_id="requirements", stage="requirements")
+except Exception:  # noqa: BLE001 — a missing optional tool must not break the agent
+    _CONFLUENCE_TOOLS = []
+    logger.warning("Requirements agent: Confluence document tools unavailable")
+
+tools = [upload_file, delete_file, generate_brd, generate_prd, generate_mom, generate_pdd,
          # PDF output, and the explicit save the user is asked for before
          # anything is written to the project's shared artifact storage.
          markdowntopdf,
@@ -2498,7 +2774,9 @@ tools = [upload_file, delete_file, generate_brd, generate_mom, generate_pdd,
          # refuses anything an owner has not accepted. There is no delete tool, here or
          # anywhere: taking a file out of the business's library is a person's job.
          *_DOCUMENT_TOOLS,
-         *_SHAREPOINT_TOOLS]
+         *_APPROVAL_TOOLS,
+         *_SHAREPOINT_TOOLS,
+         *_CONFLUENCE_TOOLS]
 
 
 # ── System prompt ──────────────────────────────────────────────────────────────
@@ -2721,18 +2999,25 @@ CRITICAL — GAP QUALITY:
 - NFRs covered by existing system standards are NOT gaps.
 
 ── FLOW H: BRD → STORIES ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-- Ask user to paste the BRD text (or key sections).
-- Call generate_stories_from_brd with the pasted content.
-- Run normalize_acceptance_criteria on the result.
+- The source is a DOCUMENT, named — never ask the user to paste it and never paste it
+  yourself. Call generate_stories_from_brd(source_documents=["<exact name>"]) with an
+  attachment, a document generated in this conversation, or an APPROVED project document
+  (list_project_documents shows them). Use brd_content only for text the user typed.
+- Run normalize_acceptance_criteria() with NO arguments — it updates the stories just
+  generated, keeping their epics.
 - Present epics, then stories with Gherkin AC.
-- Ask if user wants to create these as board items.
+- Ask if user wants to create these as board items. To create them, call
+  write_stories_to_board(project=..., create_epics=true) with NO stories_json: it creates
+  each Epic and puts every story under its epic.
 - Gap analysis only if the user explicitly asks (see FLOW G gap rules).
 
 ── FLOW I: WRITE TO PM TOOL ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 - create_board_item: creates ONE board item of ANY type.
   If the user says "create an epic", use work_item_type="Epic".
   If they say "create a feature", use work_item_type="Feature".
-- write_stories_to_board: bulk-creates User Stories from generated JSON.
+- write_stories_to_board: bulk-creates User Stories. Without stories_json it writes the
+  stories generated in this conversation; create_epics=true creates the Epics and parents
+  each story under its epic. Never re-type generated stories into stories_json.
 - write_back_normalized_to_board: updates existing board items with normalised
   description + Gherkin AC and adds an audit comment.
 - write_acceptance_criteria_to_board: patches AC onto existing board item IDs.
@@ -2794,34 +3079,49 @@ Both take an optional `parent_id` that creates the item UNDER an existing one.
 Report ONLY what a tool actually returned. If a tool returned an error, the change did
 not happen — say so. Do not describe intended changes in the past tense, and do not
 summarise a plan as though it were a result.
+- NEVER write a link or URL that did not come from a tool result or from the user. A
+  document link you compose yourself points at nothing, and the platform flags it.
+- If a document tool returned "Error:", NO document exists. Say it was not generated,
+  quote the reason, and do not describe its contents as though it were written.
 
-── FLOW J: GENERATE DOCUMENTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-After requirements are confirmed and the gap report is reviewed, offer to export:
-- generate_brd_document(project, scope_summary, stories_json, gap_report_json)
-  → full BRD as DOCX, returns download URL
-- generate_user_stories_document(project, stories_json)
-  → all stories with Gherkin AC as DOCX, returns download URL
-- generate_risk_register_document(project, stories_json, gap_report_json)
-  → risk register based on stories and gap analysis, returns download URL
-Always present the download URL from the tool result as a clickable link in your response.
+── FLOW J: GENERATE DOCUMENTS ────────────────────────────────────────────────────
+  generate_brd(file_names, custom_prompt)            Business Requirements Document
+  generate_prd(file_names, custom_prompt)            Product Requirements Document
+  generate_pdd(file_names, custom_prompt)            Process Definition Document
+  generate_risk_register(file_names, custom_prompt)  Risk register
+Each one WRITES the designed Word document, records it in the project's Documents and
+returns its download link. You do not need a second tool to save it.
+- file_names are sources BY NAME: files attached to this conversation (as they appear
+  in "--- Attached file: NAME ---"), documents generated in it, or the project's APPROVED
+  documents (e.g. "TEST_Project_BRD.docx"). Pass [] to work from the conversation alone.
+- ANY OTHER DOCUMENT the user asks for (SRS, vision, feature spec, release notes, …):
+  write it in Markdown with ## sections and save it with
+  export_document(content=..., filename="<Project>_<Type>.docx"). Deliver it as a file —
+  never answer that no tool exists for that kind of document.
+- export_document is for a DIFFERENT format of a document (PDF, Excel, Markdown), or for
+  content you wrote yourself — not to re-save a document a generator already wrote.
+- Give the user the download link EXACTLY as the tool returned it.
 Post the gap report summary as a comment on the parent epic/item using add_board_comment.
 
-── FILE UPLOADS ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-- When the user's message says "please use the following files ..." followed by
-  one or more file paths, call read_uploaded_file for EACH path first.
-- Pass extracted text to generate_stories_from_brd or generate_user_stories.
+── FILE UPLOADS ──────────────────────────────────────────────────────────────────
+- Attached files are read for you: their text is already in the conversation under
+  "--- Attached file: NAME ---". Use it directly — there is no tool to call to read it.
+- To build a BRD, PDD or risk register from an attachment, pass its NAME in file_names.
 - Supported formats: .txt, .md, .csv, .xlsx, .xls, .docx, .pdf.
-- NEVER say you cannot access files — always call read_uploaded_file.
+- If the conversation says an attachment could not be read, tell the user so.
 
-
-── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, THEN APPROVED) ────────────────────
-Every document you generate is recorded in the project's artifacts automatically, as
-AWAITING APPROVAL. You do NOT ask whether to save it, and there is no tool to call.
+── SAVING DOCUMENTS TO THE PROJECT (AUTOMATIC, AS A DRAFT) ───────────────────────
+Every document you generate is recorded in the project's Documents automatically, as a
+DRAFT. You do NOT ask whether to save it, and there is no tool to call.
 - After generating a document, tell the user it is ready and give the download link.
-- Then say it has been submitted for approval, and that a project admin decides whether
-  it joins the project's shared record.
+- Then say it is in the project's Documents as a draft, and that once it is raised for
+  approval a project admin decides whether it joins the project's shared record.
+- When the user asks to send, submit or raise a document for approval, call
+  raise_document_for_approval with its exact file name. You CAN do this for them; never
+  say only an owner or admin can raise it. You can NOT approve anything — approving is a
+  project admin's decision in Requests & Approvals.
 - Do NOT claim it has been "added to the project" or "saved to artifacts" — it is
-  waiting on someone else's decision, and saying otherwise sets the wrong expectation.
+  waiting on a decision nobody has made yet.
 - The download link works immediately either way.
 
 ── FILE FORMATS ──────────────────────────────────────────────────────────────────
@@ -2837,9 +3137,9 @@ EXTENSION you pass:
 Never substitute a format silently. If the user asks for PDF, pass a .pdf filename.
 If they ask for a format not listed here, say which ones are available.
 
-Anything you generate is filed as a project document AWAITING APPROVAL — it is not part
-of the project's record until its owner accepts it on the Documents panel. Say so when
-you produce one, rather than implying the work is finished.
+Anything you generate is filed as a DRAFT project document — it is not part of the
+project's record until it is raised for approval and a project admin accepts it. Say so
+when you produce one, rather than implying the work is finished.
 
 ── SHAREPOINT ────────────────────────────────────────────────────────────────────────
   publish_approved_to_sharepoint   file APPROVED documents into the library

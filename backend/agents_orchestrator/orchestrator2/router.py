@@ -541,10 +541,14 @@ How to decide:
   when does this land?" is the Project Manager's. Ask yourself what would ANSWER the
   message — if the answer is something one of the agents above produces, route to it.
 - THE AGENTS REACH THE PROJECT'S CONNECTED TOOLS. Whatever this project has wired up
-  — Azure DevOps boards and repositories, Jira, GitHub — the agents above work with it
-  directly. Requirements creates and reads work items on the board. Development clones
-  the repository, branches, commits, pushes and opens pull requests. This is not a
-  documents-only platform, and saying it is, is false.
+  — Azure DevOps boards and repositories, Jira, GitHub, and document systems such as
+  Confluence and SharePoint — the agents above work with it directly. Requirements
+  creates and reads work items on the board. Development clones the repository,
+  branches, commits, pushes and opens pull requests. An agent publishes the documents
+  it produced to Confluence or SharePoint. When a CONNECTED TOOLS block follows this
+  prompt, it is the authority on what this project has wired to which agent; the
+  roster above describes the agents in general. This is not a documents-only platform,
+  and saying it is, is false.
 - NEVER DECLINE ON AN AGENT'S BEHALF. You do not know what the agents cannot do; you
   know what they are for. "I can't create items in Azure Boards", "this platform
   doesn't integrate with external trackers", "I can't pull code directly" — every one
@@ -765,6 +769,18 @@ WHAT THE LIST ABOVE MEANS FOR YOUR DECISION:
 """
 
 
+def _system_prompt_with_tools(base: str, connected_tools: str) -> str:
+    """`base`, plus the project's connected tools when there are any.
+
+    `connected_tools` is the rendered block from `project_tools` — it carries its own
+    rules — or `""`, which adds nothing. Placed after the documents block: the model
+    reads what exists, then who can act on it where.
+    """
+    if not (connected_tools or "").strip():
+        return base
+    return base + "\n\n" + connected_tools.rstrip("\n") + "\n"
+
+
 def _system_prompt_with_documents(base: str, documents: str) -> str:
     """`base`, plus the project's approved documents when there are any.
 
@@ -783,9 +799,10 @@ def _system_prompt_with_continuity(
     capabilities: Mapping[str, Any] | None = None,
     track: str = DEFAULT_TRACK,
     documents: str = "",
+    connected_tools: str = "",
 ) -> str:
     """`_system_prompt`, plus who is mid-conversation when anyone is, plus what the
-    project has approved when anything is.
+    project has approved when anything is, plus what it has connected when anything is.
 
     An unknown agent id is treated as no agent rather than raising: this is a hint,
     and a routing turn is the wrong place to fail over one. `last_agent` outside
@@ -794,8 +811,9 @@ def _system_prompt_with_continuity(
     note would tell the model to route back to an agent the tool list does not
     include, which `_validated` would then have to refuse anyway.
 
-    Continuity first, documents after: both are appended, so the order only decides
-    which the model reads last, and the list of documents is the longer of the two.
+    Continuity first, then documents, then connected tools: all are appended, so the
+    order only decides what the model reads last — what exists, then who can act on
+    it where.
     """
     source = _default_capabilities() if capabilities is None else capabilities
     prompt = _system_prompt(capabilities, track)
@@ -803,7 +821,8 @@ def _system_prompt_with_continuity(
         prompt += _CONTINUITY_TEMPLATE.format(
             name=DISPLAY_NAMES[last_agent], tool=f"{_TOOL_PREFIX}{last_agent}",
         )
-    return _system_prompt_with_documents(prompt, documents)
+    prompt = _system_prompt_with_documents(prompt, documents)
+    return _system_prompt_with_tools(prompt, connected_tools)
 
 
 def _llm_kwargs(resolved: Any) -> dict:
@@ -1226,8 +1245,14 @@ async def route(
     last_agent: str | None = None,
     track: str = "greenfield",
     documents: str = "",
+    connected_tools: str = "",
 ) -> RoutingDecision:
     """Decide which agent in `track`'s portfolio handles `text`, or answer directly.
+
+    `connected_tools` is the project's per-agent connector block from
+    `project_tools.connected_tools_context`, or `""`. Like `documents`, it changes what
+    the model is TOLD: with it, "upload this to Confluence" routes to the agent this
+    project granted Confluence to, instead of being declined on every agent's behalf.
 
     `documents` is the project's approved-documents block from
     `project_documents.approved_documents_context`, or `""`. It changes what the model
@@ -1316,7 +1341,8 @@ async def route(
         # outstanding, which a bare "2" does not carry on its own. `documents` is the
         # other fact about the run the model cannot see from the conversation alone.
         system_prompt=_system_prompt_with_continuity(
-            last_agent, capabilities, track, documents=documents,
+            last_agent, capabilities, track,
+            documents=documents, connected_tools=connected_tools,
         ),
         capabilities=capabilities,
     )

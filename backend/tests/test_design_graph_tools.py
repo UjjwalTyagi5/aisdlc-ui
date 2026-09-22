@@ -6,9 +6,13 @@ def test_design_tools_bound_to_graph():
     assert "analyze_existing_system" in tool_names
 
 
-def test_prompt_has_security_section_header():
+def test_prompt_names_the_security_component():
+    """The security review is a COMPONENT the user can ask for (since 2026-09-15 the
+    agent produces only what is asked); the prompt must still name it and its OWASP
+    scope so the agent can offer it."""
     from agents_orchestrator.design_architecture_agent.agents.architecture import DESIGN_SYS_MESSAGE
-    assert "## SECURITY DESIGN CHECKLIST" in DESIGN_SYS_MESSAGE
+    assert "SECURITY DESIGN CHECKLIST" in DESIGN_SYS_MESSAGE
+    assert "Security design" in DESIGN_SYS_MESSAGE
 
 
 def test_prompt_mentions_validation_loops_and_existing_system():
@@ -36,18 +40,18 @@ def test_arch_gen_prompt_mandates_full_diagram_set():
     (good) design runs produced: HLD, LLD (component/class + sequence), all
     three C4 levels, and an ERD alongside the DB DDL. Regression guard for the
     "dropped diagrams" bug — a template that only asked for C4 + DB DDL."""
-    from agents_orchestrator.design_architecture_agent.prompts.architecture_generation import ARCH_GEN_PROMPT
-    low = ARCH_GEN_PROMPT.lower()
+    from agents_orchestrator.design_architecture_agent.components import build_generation_prompt
+    low = build_generation_prompt(["all"]).lower()
 
     # Exact canonical headers the frontend/parser split on (parse_design_markdown
     # in shared/services/orchestrator/artifacts_view.py splits on "## " headers).
-    assert "## high-level design (hld)" in low
-    assert "## low-level design (lld)" in low
-    assert "## c4 architecture diagram" in low
+    assert "## high-level design" in low
+    assert "## low-level design" in low
+    assert "## c4 architecture diagrams" in low
     assert "## database schema" in low
-    assert "## api contracts" in low
-    assert "## architecture decision records (adrs)" in low
-    assert "## technology stack & infrastructure" in low
+    assert "## api contract" in low
+    assert "## architecture decision records" in low
+    assert "## technology stack" in low
 
     # Required diagram types, explicitly mandated.
     assert "classdiagram" in low  # LLD component/class diagram
@@ -64,11 +68,11 @@ def test_arch_gen_prompt_headers_match_frontend_parser():
     parse_design_markdown (which regex-splits on '^##\\s+' lines) and map to the
     same canonical titles the Copilot artifacts panel expects."""
     import re
-    from agents_orchestrator.design_architecture_agent.prompts.architecture_generation import ARCH_GEN_PROMPT
+    from agents_orchestrator.design_architecture_agent.components import build_generation_prompt
     from shared.services.orchestrator.artifacts_view import _DESIGN_HEADER_MAP
 
-    headers = re.findall(r"(?m)^##\s+(.+?)\s*$", ARCH_GEN_PROMPT)
-    assert headers, "no level-2 (##) headers found in ARCH_GEN_PROMPT"
+    headers = re.findall(r"(?m)^##\s+(.+?)\s*$", build_generation_prompt(["all"]))
+    assert headers, "no level-2 (##) headers found in the full generation prompt"
 
     canonical_titles = {title for _, title in _DESIGN_HEADER_MAP}
     matched = set()

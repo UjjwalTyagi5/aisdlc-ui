@@ -9,29 +9,29 @@ import { api } from "./client";
 
 /**
  * Schema matching CostBreakdownRow from agentic_app/shared/routers/_schemas.py
- * (REQ-M9-07/08/09) — one aggregate row per model, optionally per (agent, model).
+ * (REQ-M9-07/08/09) — one aggregate row per (agent, model).
  *
- * `agentType` IS OPTIONAL, AND THAT IS NOT A STYLE CHOICE. The backend does not
- * emit it: CostBreakdownRow in _schemas.py carries model/tokens/cost/callCount
- * only, and tests/cost/test_cost_api.py asserts `"agentType" not in rows[0]`,
- * because /cost is sourced from Langfuse's daily-metrics endpoint, which
- * aggregates by model. Requiring the field here made this schema unparseable
- * against the real API — harmless only while ENABLE_LANGFUSE was false and
- * `rows` came back empty (an empty array parses fine), and a hard throw in
- * CostDashboard on the first real row.
+ * `agentType` MUST TOLERATE null, AND THAT IS NOT A STYLE CHOICE. The backend
+ * derives it from the trace name (`sdlc:{agent_type}`) and types it
+ * `Optional[str] = None`, so a trace not written by this platform's agents —
+ * a bare `LangGraph` run, a connectivity probe — serializes as an explicit
+ * `"agentType": null`. Zod's `.optional()` accepts `undefined` and REJECTS
+ * `null`, so the whole Cost page died with SCHEMA_MISMATCH the moment real
+ * Langfuse data arrived. It was invisible for as long as `rows` came back
+ * empty, because an empty array parses fine.
  *
- * Agent-level attribution (PRD FR-09) is still the question worth answering —
- * "which agent is expensive" is what decides where to tune a prompt. Getting it
- * back means one Langfuse query per agent_type tag, merged the way cost.py
- * already fans out per workspace. Until that exists, the table hides the column
- * rather than inventing a value for it.
+ * `.catch(null)` on top, because the value is a free-form string on the wire
+ * and this enum is a closed set: a trace named `sdlc:something-new` must show
+ * as unattributed, not blank the page. CostDashboard already renders a missing
+ * agent as "—" and skips it in the per-agent rollup, so null is a shape it
+ * handles rather than one it merely survives.
  */
 export const CostBreakdownRow = z.object({
   /**
    * The agent that consumed it, as a pipeline phase (`PHASE_LABEL` renders it).
-   * Absent whenever the row came from a model-only aggregate — see above.
+   * `null` whenever the trace carried no `sdlc:` name to attribute — see above.
    */
-  agentType: Phase.optional(),
+  agentType: Phase.nullish().catch(null),
   model: z.string(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),

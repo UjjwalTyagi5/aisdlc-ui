@@ -157,6 +157,7 @@ async def grant_role(
     tier: str | None = None,
     expires_at: datetime | None = None,
     granted_by: str | None = None,
+    system_reason: str | None = None,
 ) -> None:
     """Idempotently assign role_name to user_id at (scope_kind, scope_id) under tenant_id.
 
@@ -302,6 +303,23 @@ async def grant_role(
         # the record of it commit together — an audit row describing a grant that was
         # rolled back is worse than no row at all.
         if _changed:
+            # PRD §34.9's before/after. `_changed` is already true for exactly two
+            # reasons and they are different events wearing the same event_type:
+            #
+            #   _prior is None        an appointment  none -> developer
+            #   the expiry moved      an extension    developer until X -> until Y
+            #
+            # Recorded as the two states rather than as "granted developer", which
+            # cannot tell an appointment from a nine-month extension of something
+            # somebody already had.
+            def _held(expiry) -> str:
+                return f"{role_name} until {expiry.date().isoformat() if expiry else 'no expiry'}"
+
+            if _prior is None:
+                _before, _after = "none", _held(expires_at)
+            else:
+                _before, _after = _held(_prior.expires_at), _held(expires_at)
+
             await record_rbac_change(
                 session,
                 tenant_id=str(tenant_uuid),
@@ -311,6 +329,9 @@ async def grant_role(
                 scope_kind=scope_kind,
                 scope_id=str(scope_uuid),
                 role=role_name,
+                before=_before,
+                after=_after,
+                system_reason=system_reason,
                 extra={
                     "tier": effective_tier,
                     "expires_at": expires_at.isoformat() if expires_at else None,
@@ -413,6 +434,7 @@ async def revoke_role(
     tenant_id: str,
     scope_kind: str = "business_unit",
     revoked_by: str | None = None,
+    system_reason: str | None = None,
 ) -> None:
     """Remove role_name from user_id at (scope_kind, scope_id) under tenant_id (idempotent).
 
@@ -470,6 +492,11 @@ async def revoke_role(
                 scope_kind=scope_kind,
                 scope_id=str(scope_uuid),
                 role=role_name,
+                # The row is only written when something was actually deleted, so the
+                # prior state is not in doubt: they held it, and now they do not.
+                before=role_name,
+                after="none",
+                system_reason=system_reason,
             )
 
     # THE CASE THIS WHOLE MECHANISM EXISTS FOR. Deleting a binding used to change
@@ -607,6 +634,8 @@ async def grant_custom_role(
             scope_kind=scope_kind,
             scope_id=str(scope_uuid),
             role=str(role_uuid),
+            before="none",
+            after=getattr(owner, "name", None) or str(role_uuid),
             extra={"custom_role_owner_scope": owner.scope_kind},
         )
 

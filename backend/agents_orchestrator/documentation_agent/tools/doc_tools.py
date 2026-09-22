@@ -219,11 +219,19 @@ async def read_upstream_artifacts() -> str:
 
         async with get_db_session_for_tenant(s.tenant_id) as db:
             col = getattr(Run, column)
-            return (await db.execute(
+            if column not in _PER_REPO_COLUMNS:
+                return (await db.execute(
+                    select(col)
+                    .where(Run.project_id == uuid.UUID(s.project_id), col.isnot(None))
+                    .order_by(Run.created_at.desc()).limit(1)
+                )).scalars().first()
+            # The newest result FOR THE REPOSITORY BEING DOCUMENTED — see _other_repo.
+            recent = (await db.execute(
                 select(col)
                 .where(Run.project_id == uuid.UUID(s.project_id), col.isnot(None))
-                .order_by(Run.created_at.desc()).limit(1)
-            )).scalars().first()
+                .order_by(Run.created_at.desc()).limit(25)
+            )).scalars().all()
+            return next((r for r in recent if not _other_repo(r, s.repo_name)), None)
 
     for key, col in cols.items():
         result = await read_upstream_for_agent(
@@ -233,12 +241,45 @@ async def read_upstream_artifacts() -> str:
             stage=key, consumer_stage="documentation",
             legacy_reader=lambda c=col: _legacy(c),
         )
+        from shared.services.upstream_results import compact  # noqa: PLC0415
+
         out[key] = result.payload if result.found else None
+        elsewhere = _other_repo(out[key], s.repo_name) if key in ("code_review", "security") else None
+        if elsewhere:
+            out[key] = None
+            out[f"{key}_status"] = (
+                f"The {key.replace('_', ' ')} on file describes {elsewhere}, not the repository "
+                f"being documented ({s.repo_name}); it says nothing about this code. Treat this "
+                f"stage as having no result for {s.repo_name}."
+            )
+            continue
+        # SMALL ENOUGH TO READ WHOLE: the security result alone is ~170 KB with its scan
+        # and SBOM, and this output is cut at 20 KB — see upstream_results.compact.
+        out[key] = compact(key, out[key])
         # Documentation compiles what it is given. Without this it would silently
         # publish a document with a whole section missing, and read as complete.
         if not result.found and not result.unenforced:
             out[f"{key}_status"] = describe(result)
     return json.dumps(out, default=str)[:20000]
+
+
+#: `runs` columns whose result is about ONE repository (its `context.repo_name`).
+_PER_REPO_COLUMNS = {"code_review_artifacts", "security_artifacts"}
+
+
+def _other_repo(payload: object, repo_name: str) -> str | None:
+    """See shared/services/upstream_results.other_repo — a live handover described a
+    .NET app reviewed minutes earlier as the QuickLink branch."""
+    from shared.services.upstream_results import other_repo  # noqa: PLC0415
+
+    return other_repo(payload, repo_name)
+
+
+_DOC_TYPES = {
+    "overview", "sdd", "api_reference", "code_summary", "changelog",
+    "release_notes", "rtm", "run_summary", "compliance", "doc_set", "custom",
+    "runbook_update", "knowledge_article", "handover", "kt",
+}
 
 
 def _output_dir(s) -> pathlib.Path:
@@ -271,49 +312,76 @@ async def save_document(doc_type: str, title: str, filename: str, markdown_conte
     except Exception as exc:
         return f"ERROR saving document: {str(exc)[:300]}"
 
+    # THE WORD FILE, BESIDE THE MARKDOWN. The markdown is what a docs PR commits and
+    # what the page renders; the Word file is what is filed for approval — the same
+    # shape as every other agent's document (see documentation_document).
+    from agents_orchestrator.documentation_agent.documentation_document import (  # noqa: PLC0415
+        kind_label, write_documentation_docx,
+    )
+
+    doc_type = doc_type if doc_type in _DOC_TYPES else "custom"
+    target = (f"PR #{s.pr_id}" if s.mode == "pr" and s.pr_id else
+              f"branch {s.source_branch}" if s.source_branch else "")
+    try:
+        docx_path = await asyncio.to_thread(
+            write_documentation_docx, markdown_contents, str(path),
+            doc_type=doc_type, title=title, project=s.ado_project, repo=s.repo_name,
+            target=target, head_sha=s.head_sha,
+        )
+    except Exception as exc:  # noqa: BLE001 — said, not swallowed
+        logger.exception("save_document: Word document not written for %s", safe)
+        return (f"ERROR: '{title or safe}' was written as {safe}, but its Word document could "
+                f"not be produced ({type(exc).__name__}: {str(exc)[:200]}), so it is NOT in the "
+                "project's Documents and cannot be raised for approval. Tell the user exactly this.")
+    docx_name = os.path.basename(docx_path)
+
     doc_id = uuid.uuid4().hex[:10]
-    s.generated_docs = [d for d in s.generated_docs if d.get("filename") != safe]
-    s.generated_docs.append({
+    entry = {
         "id": doc_id,
-        "type": doc_type if doc_type in {
-            "overview", "sdd", "api_reference", "code_summary", "changelog",
-            "release_notes", "rtm", "run_summary", "compliance", "doc_set", "custom",
-            "runbook_update", "knowledge_article", "handover", "kt",
-        } else "custom",
+        "type": doc_type,
         "title": title or safe,
         "filename": safe,
+        "docx_filename": docx_name,
         "format": "md",
         "path": str(path),
         "contents": markdown_contents,
         "bytes": len(markdown_contents.encode("utf-8")),
+    }
+    s.generated_docs = [d for d in s.generated_docs if d.get("filename") != safe]
+    s.generated_docs.append(entry)
+    broadcast_log(manager, f"Generated document: {title or safe} ({docx_name})", level="SUCCESS")
+
+    # INTO THE PROJECT'S RECORD, AS A DRAFT. Until this was added the document lived on
+    # local disk and in `s.generated_docs` alone — an in-memory list that dies with the
+    # session — so it could never be approved, read by another agent, or survive a
+    # restart. It is registered as a DRAFT (see register_generated_file): recording is
+    # not asking, and the person who ran the agent decides when to raise it.
+    from config import sdlcSettings  # noqa: PLC0415
+    from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+    from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+
+    rel = os.path.relpath(docx_path, sdlcSettings().FILES).replace("\\", "/")
+    url = "" if rel.startswith("..") else f"{AGENTIC_BASE_URL}/generated/{rel}"
+    artifact_id = await register_generated_file(
+        docx_name, docx_path, url, stage="documentation",
+        note=f"{kind_label(doc_type)} generated by the Documentation agent.",
+    )
+    entry["artifact_id"], entry["url"] = artifact_id, url
+    if not artifact_id:
+        return (f"Saved '{title or safe}' as {docx_name} with {safe} as its source, but it could "
+                "NOT be recorded in the project's Documents (no project in this session, or the "
+                "store refused it), so it cannot be raised for approval. Tell the user exactly this.")
+
+    # The chat's document card, and the page's cue to open it — by id, because several
+    # documents can share a file name.
+    await manager.broadcast({
+        "type": "file_generated", "session_id": get_session_id(),
+        "filename": docx_name, "url": url, "artifact_id": artifact_id,
+        "file_size": os.path.getsize(docx_path), "message": f"Generated file: {docx_name}",
     })
-    broadcast_log(manager, f"Generated document: {title or safe} ({safe})", level="SUCCESS")
-
-    # AND INTO THE PROJECT'S RECORD, PENDING APPROVAL — the same act every other agent
-    # performs when it generates a file. Until now this tool wrote to local disk and to
-    # `s.generated_docs`, an in-memory list that dies with the session: the document
-    # appeared in the left-hand list, could be published to SharePoint and Confluence,
-    # and yet no `artifacts` row ever existed for it. So it could never be approved,
-    # never be read by another agent, and never survive a restart. A document the
-    # business is expected to rely on cannot live only in a chat session.
-    #
-    # Best-effort by design, like the requirements agent's call: a document that was
-    # generated and shown is not un-generated by a failure to record it, and losing the
-    # whole turn over that would be worse than the missing row.
-    stored = ""
-    try:
-        from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
-
-        await register_generated_file(safe, str(path), "", stage="documentation")
-        stored = (" It has also been added to the project's Documents panel as PENDING "
-                  "— an owner has to approve it before other agents can read it or it "
-                  "can be filed to SharePoint.")
-    except Exception:  # noqa: BLE001
-        logger.warning("save_document: could not record %s as an artifact", safe,
-                       exc_info=True)
-
-    return (f"Saved '{title or safe}' as {safe} ({len(markdown_contents)} chars). It now "
-            f"appears in the user's document list.{stored} "
+    return (f"Saved '{title or safe}' as {docx_name} (Word, with {safe} as its markdown source). "
+            "It is in the project's Documents panel as a DRAFT — not yet raised for approval. "
+            f"If the user wants it approved, call raise_document_for_approval with \"{docx_name}\". "
             f"{len(s.generated_docs)} document(s) generated this session.")
 
 
@@ -633,8 +701,13 @@ async def publish_to_confluence(space: str = "", filename: str = "", parent_id: 
         return ("ERROR: could not confirm which documents are approved, so nothing was "
                 "published. Only approved documents can be filed to Confluence.")
 
-    blocked = [d.get("filename", "?") for d in docs if d.get("filename") not in approved_names]
-    docs = [d for d in docs if d.get("filename") in approved_names]
+    # The approved row is the Word file (`handover.docx`); the session holds its markdown
+    # (`handover.md`). Same stem — matched on that, or nothing saved since documents
+    # became Word files could ever be published.
+    approved_stems = {os.path.splitext(n)[0] for n in approved_names}
+    blocked = [d.get("filename", "?") for d in docs
+               if os.path.splitext(d.get("filename") or "")[0] not in approved_stems]
+    docs = [d for d in docs if os.path.splitext(d.get("filename") or "")[0] in approved_stems]
     if not docs:
         # NAMED, not silently skipped: "nothing to publish" sends somebody looking for
         # a bug when the documents are sitting right there, waiting on an approver.

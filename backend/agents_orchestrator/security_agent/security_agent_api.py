@@ -10,8 +10,10 @@ The WS path bypasses the pipeline capability spine, so BYO MCP tools are injecte
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from uuid import uuid4
@@ -54,6 +56,7 @@ from shared.audit import AuditCallbackHandler
 from shared.observability import agent_trace
 from shared.audit.service import audit_service
 from shared.db import get_db_session, get_db_session_for_tenant
+from shared.services.conversation_service import persist_turn
 from shared.services.prompt_runtime import prompt_override_scope
 from shared.services.skill_runtime import skill_context_scope
 from shared.services.standalone_prompt import resolve_agent_turn
@@ -142,27 +145,40 @@ async def _load_mcp_tools(tenant_id: str, project_id: str | None) -> list:
         return []
 
 
-async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: str) -> str:
+async def _stream(
+    state: dict, config: dict, websocket: WebSocket, session_id: str, before_end=None,
+) -> str:
+    """Stream the agent's ANSWERS to the client; `before_end` runs BEFORE `stream_end`.
+
+    Same shape as code_review_agent_api._stream, for the same reasons: the page refetches
+    the scan list the moment it stops being busy, so the scan is saved before that
+    signal; only the text of messages that call no tool is relayed (not the model's
+    working, not tool results, not the graph's own nudge); and a failure after some
+    text is still a failure — it used to be swallowed and announced as "Scan complete".
+    """
     from langgraph.errors import GraphRecursionError
 
-    final, got = "", False
+    from shared.services.answer_stream import AnswerStream  # noqa: PLC0415
+
+    final, failure = "", None
+    answers = AnswerStream(_extract_text)
+
+    async def _send(text: str) -> None:
+        nonlocal final
+        if not text:
+            return
+        final += text
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
+            websocket,
+        )
+
     try:
         async for chunk in scan_app.astream(state, stream_mode="messages", config=config):
-            msg = chunk[0] if isinstance(chunk, tuple) else chunk
-            if isinstance(msg, ToolMessage) or not hasattr(msg, "content"):
-                continue
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                continue
-            text = _extract_text(msg.content)
-            if not text:
-                continue
-            final += text
-            got = True
-            await manager.send_personal_message(
-                json.dumps({"type": "stream_chunk", "content": text, "session_id": session_id}),
-                websocket,
-            )
+            await _send(answers.feed(chunk[0] if isinstance(chunk, tuple) else chunk))
+        await _send(answers.close())
     except GraphRecursionError:
+        await _send(answers.close())
         notice = "Step limit reached for this scan. Send another message to continue."
         await manager.send_personal_message(
             json.dumps({"type": "stream_chunk", "content": f"\n\n> ⚠️ {notice}", "session_id": session_id}),
@@ -170,12 +186,91 @@ async def _stream(state: dict, config: dict, websocket: WebSocket, session_id: s
         )
     except Exception as e:
         logger.error("Security stream error: %s", e)
-        if not got:
-            raise
+        failure = e
+    if before_end is not None:
+        try:
+            await before_end()
+        except Exception:  # noqa: BLE001 — a failed save must not strand the client
+            logger.exception("Security: before_end hook failed for session %s", session_id)
+    if failure is not None:
+        raise failure
     await manager.send_personal_message(
         json.dumps({"type": "stream_end", "session_id": session_id}), websocket
     )
     return final
+
+
+async def _write_security_document(session_id: str, artifact: dict) -> dict:
+    """File the Security Review Report — the scan as a Word document plus its page copy —
+    as a DRAFT in the project's Documents. Returns {filename, url, artifact_id} or
+    {error: why}; the caller records either on the scan."""
+    from config import sdlcSettings  # noqa: PLC0415
+    from config.env import AGENTIC_BASE_URL  # noqa: PLC0415
+
+    from agents_orchestrator.security_agent.review_document import write_security_report  # noqa: PLC0415
+    from shared.services.chat_artifacts import register_generated_file  # noqa: PLC0415
+
+    s = get_session(session_id)
+    user_id = _ctx_user_id() or getattr(s, "owner_id", "") or "security"
+    out_dir = f"{sdlcSettings().FILES}/{user_id}/security/{session_id}/output"
+    try:
+        docx_path, _md_path = await asyncio.to_thread(write_security_report, artifact, out_dir)
+    except Exception as exc:  # noqa: BLE001 — recorded on the scan, not swallowed
+        logger.exception("Security report not written for session %s", session_id)
+        return {"error": f"The report document could not be written ({type(exc).__name__}: {exc})"}
+    filename = os.path.basename(docx_path)
+    url = f"{AGENTIC_BASE_URL}/generated/{user_id}/security/{session_id}/output/{filename}"
+    artifact_id = await register_generated_file(
+        filename, docx_path, url, stage="security",
+        note="Security review report generated by the Security agent.",
+    )
+    await manager.broadcast({
+        "type": "file_generated",
+        "session_id": session_id,
+        "filename": filename,
+        "url": url,
+        "artifact_id": artifact_id,
+        "file_size": os.path.getsize(docx_path),
+        "message": f"Generated file: {filename}",
+    })
+    return {"filename": filename, "url": url, "artifact_id": artifact_id}
+
+
+async def _saved_scan_note(s, tenant_id: str, project_id: str) -> str:
+    """What is already on file for THIS target, for a conversation that starts after it —
+    so "send the report for approval" acts on the saved report rather than scanning again."""
+    if not (getattr(s, "repo_name", "") and getattr(s, "head_sha", "") and tenant_id and project_id):
+        return ""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from shared.models.orm import Run  # noqa: PLC0415
+
+    try:
+        async with get_db_session_for_tenant(tenant_id) as db:
+            rows = (await db.execute(
+                select(Run).where(
+                    Run.project_id == uuid.UUID(project_id), Run.tenant_id == uuid.UUID(tenant_id),
+                    Run.security_artifacts.isnot(None),
+                ).order_by(Run.created_at.desc()).limit(20)
+            )).scalars().all()
+    except Exception:  # noqa: BLE001 — a note, never a failed turn
+        logger.warning("saved-scan lookup failed for session %s", getattr(s, "session_id", ""), exc_info=True)
+        return ""
+    for run in rows:
+        art = run.security_artifacts or {}
+        ctx = art.get("context") or {}
+        if ctx.get("repo_name") == s.repo_name and ctx.get("head_sha") == s.head_sha:
+            report = (art.get("document") or {}).get("filename")
+            when = f" on {run.created_at:%d %b %Y %H:%M} UTC" if getattr(run, "created_at", None) else ""
+            return (
+                f"\nA security review of this exact target is already saved{when}: sign-off "
+                f"{(art.get('signoff') or {}).get('decision') or 'unknown'}, risk {art.get('risk_score') or 'unknown'}, "
+                f"{len(art.get('findings') or [])} finding(s)"
+                + (f"; its report is '{report}' in the project's Documents" if report else "")
+                + ". Do NOT scan again unless the user asks for a new scan — a request to send, "
+                "raise, publish or explain the report is about that saved report.\n"
+            )
+    return ""
 
 
 async def _persist_scan_to_run(session_id: str, project_id: str | None, tenant_id: str) -> None:
@@ -185,6 +280,10 @@ async def _persist_scan_to_run(session_id: str, project_id: str | None, tenant_i
     from shared.models.orm import Run
 
     artifact = dict(s.last_artifact)
+    # THE REPORT IS FILED WITH THE SCAN, as a Code Review report is: a Word document
+    # plus its page copy, a DRAFT in Documents that can be raised for approval and
+    # published. Written before the Run row so the row links it.
+    artifact["document"] = await _write_security_document(session_id, artifact)
     # EVERY COMPLETED SCAN IS SAVED — same fix, same reasoning as
     # code_review_agent_api._persist_review_to_run: skipping the insert when a run
     # already carried this head_sha silently discarded a scan the reader had just
@@ -338,9 +437,13 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             "offering_id": message_data.get("offering_id"),
         }
 
+        # A new turn: submit's refusal count is per turn (see security_tools._MAX_REFUSALS).
+        s.submit_refusals, s.last_submit_refusal = 0, ""
         first = not s.system_injected
         if first:
             ctx = _scan_context_block(s)
+            if ctx:
+                ctx += await _saved_scan_note(s, tenant_id or s.tenant_id, project_id or s.project_id)
             content = (ctx + "\n" + user_text) if ctx else user_text
             state = {"messages": [HumanMessage(content=content)], **_model_state}
             s.system_injected = True
@@ -359,6 +462,13 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             attachment_paths_from_context(message_data.get("pipeline_context"))
         ):
             state["messages"].append(HumanMessage(content=_content))
+
+        # THE TRANSCRIPT, like every other agent's — the drawer lists this agent's past
+        # conversations, and each opened empty because nothing was ever written.
+        await persist_turn(
+            session_id, "user", user_text, tenant_id=tenant_id or s.tenant_id or None,
+            author_id=str(user_id) if user_id else None,
+        )
 
         audit = AuditCallbackHandler(audit_service, run_id=session_id, tenant_id=tenant_id)
         _lf_cbs, _lf_meta = await agent_trace(session_id=session_id, tenant_id=tenant_id, user_id=user_id, agent_type="security", project_id=_project_id_from_message(message_data))
@@ -381,14 +491,21 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
             "security", SECURITY_SYSTEM_PROMPT,
             tenant_id or s.tenant_id, project_id or s.project_id,
         )
+        # Saved BEFORE `stream_end` reaches the client: the page opens the newest scan
+        # the moment it stops being busy, so the row has to exist by then.
+        async def _save() -> None:
+            await _persist_scan_to_run(session_id, project_id or s.project_id, tenant_id or s.tenant_id)
+
         try:
             async with prompt_override_scope("security", _injected):
                 async with skill_context_scope("security", _skills):
-                    await _stream(state, config, websocket, session_id)
+                    reply = await _stream(state, config, websocket, session_id, before_end=_save)
         finally:
             clear_mcp_tools()
-
-        await _persist_scan_to_run(session_id, project_id or s.project_id, tenant_id or s.tenant_id)
+        await persist_turn(
+            session_id, "agent", reply, tenant_id=tenant_id or s.tenant_id or None,
+            author_id="security", model=message_data.get("model_id"),
+        )
         await manager.broadcast({
             "type": "activity_update",
             "activity": {
@@ -398,7 +515,42 @@ async def _process_ws_message(message_data: dict, websocket: WebSocket, user_id,
         })
     except Exception as e:
         logger.error("Security WS process error: %s", e)
-        await manager.send_agent_response("Error Agent", f"An error occurred: {e}", session_id)
+        reason = _failure_reason(e)
+        await manager.send_agent_response("Error Agent", f"An error occurred: {reason}", session_id)
+        await persist_turn(
+            session_id, "agent", f"An error occurred: {reason}", tenant_id=tenant_id or None,
+            author_id="security",
+        )
+        # THE TURN MUST SAY IT IS OVER, and that it failed — the chat BFF ends a run on
+        # activity_update{complete} or agent_completed{success: false}. Without both a
+        # dead model key left the drawer on "Agent is working" with the composer locked.
+        await manager.broadcast({
+            "type": "agent_completed", "session_id": session_id,
+            "success": False, "error": reason,
+        })
+        await manager.send_personal_message(
+            json.dumps({"type": "stream_end", "session_id": session_id}), websocket
+        )
+        await manager.broadcast({
+            "type": "activity_update",
+            "activity": {
+                "id": str(uuid4()), "type": "complete",
+                "session_id": session_id, "message": "Scan failed", "time": "Just now",
+            },
+        })
+
+
+#: Exceptions raised by a model provider's SDK: their text can echo a BYOK key and does
+#: not say who fixes the problem, so they are answered by `friendly_model_error`.
+_PROVIDER_MODULES = frozenset({"litellm", "openai", "anthropic", "httpx"})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    from shared.services.model_errors import friendly_model_error  # noqa: PLC0415
+
+    if (type(exc).__module__ or "").split(".")[0] in _PROVIDER_MODULES:
+        return friendly_model_error(exc)
+    return str(exc) or type(exc).__name__
 
 
 @security_router.post("/chat/")
@@ -438,6 +590,7 @@ async def chat(
     s = get_session(session_id)
     s.project_id = s.project_id or project_id
     s.tenant_id = s.tenant_id or real_tenant_id
+    s.submit_refusals, s.last_submit_refusal = 0, ""
     first = not s.system_injected
     user_text = text or "Please run the security scan and submit your review."
     # Same tenant/project the WS path passes. This route used to send neither, so

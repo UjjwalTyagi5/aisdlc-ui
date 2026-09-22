@@ -32,6 +32,14 @@ class ScanSessionState:
     # found nothing. generate_sbom relies on that distinction to avoid reporting a
     # confident-looking "0 vulnerabilities" for a scan that never happened.
     last_trivy_findings: Optional[list] = None
+    #: The one full scan of this target (shared/services/code_security_scan), from which
+    #: the scanner tools answer. Keyed by work_dir so a new target scans again.
+    security_scan: Optional[dict] = None
+    #: submit_security_review refusals in the current turn (reset when a turn starts),
+    #: and the last reason — so a review the gate keeps refusing ends the turn with the
+    #: reason instead of looping until the recursion limit.
+    submit_refusals: int = 0
+    last_submit_refusal: str = ""
     system_injected: bool = False
     mcp_tools: list = field(default_factory=list)
     mcp_loaded: bool = False

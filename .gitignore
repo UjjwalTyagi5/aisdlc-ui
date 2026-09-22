@@ -38,6 +38,12 @@ backend/.temporal-dev.db-journal
 # The real backend .env holds live API keys, a JWT signing key and Postgres
 # credentials. backend/.env.example carries the shape instead.
 backend/.env
+# Any copy of it. Switching the app between environments means keeping the previous
+# DSNs somewhere, and a file called `.env.azure-backup` holds exactly the credentials
+# `backend/.env` is ignored FOR — the pattern, not one filename, because the next one
+# will be called something else.
+backend/.env.*backup*
+backend/.env.bak
 
 # Same class of local credentials, for the isolated test database
 # (docs/local-setup.md, "Test database"). backend/.env.test.example carries the shape.

@@ -87,11 +87,18 @@ export function tileStateFor(
   phase: Phase,
   track: DeliveryTrack,
   builtAgents: readonly Phase[],
+  reach?: Readonly<Partial<Record<Phase, Involvement>>>,
 ): TileState {
   if (!agentsForTrack(track).includes(phase)) return "coming_soon";
   if (!builtAgents.includes(phase)) return "coming_soon";
 
-  const involvement = involvementFor(role, phase);
+  // `reach` is the API's own answer for THIS person on THIS project
+  // (`getMyAgentAccess`): it already folds in the extra agents granted to them from
+  // the Members page and any per-project override. The static table is what the
+  // page shows before that answer arrives, and what it falls back to for a phase the
+  // API does not know. Deciding from the table alone is how a granted extra agent
+  // stayed padlocked.
+  const involvement = reach?.[phase] ?? involvementFor(role, phase);
   if (involvement === "none") return "locked";
   if (involvement === "owner" || involvement === "primary") return "owner";
   return "use";

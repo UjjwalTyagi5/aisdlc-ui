@@ -7,7 +7,7 @@ tool node. Import as:
 """
 from __future__ import annotations
 
-from typing import Annotated, Optional, Sequence
+from typing import Annotated, Any, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, START, END
@@ -37,6 +37,7 @@ from agents_orchestrator.documentation_agent.tools.doc_tools import (
     ingest_confluence_page,
 )
 from shared.tools.mcp_runtime import get_mcp_tools, make_dynamic_tool_node
+from shared.tools.document_approval import make_approval_tools
 from shared.services.skill_runtime import get_skill_tools
 from shared.services.prompt_runtime import get_prompt_override
 
@@ -44,8 +45,12 @@ from shared.services.prompt_runtime import get_prompt_override
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     tenant_id: Optional[str]
+    project_id: Optional[str]
     model_id: Optional[str]
     offering_id: Optional[str]
+    # The run's resolved model, carried so the tools node can re-establish it: LangGraph
+    # may run a node in a task context the agent node's contextvar does not reach.
+    resolved_model: Any
 
 
 
@@ -101,6 +106,8 @@ _tools = [
     ingest_confluence_page,
     *_DOCUMENT_TOOLS,
     *_SHAREPOINT_TOOLS,
+    # A saved document is a DRAFT; this is the same raise the Documents panel's button does.
+    *make_approval_tools("documentation"),
 ]
 
 
@@ -134,14 +141,45 @@ def _resolve_model(state: AgentState):
 
 
 async def agent_node(state: AgentState) -> dict:
+    """Resolve the run's model, then invoke it.
+
+    THE RESOLUTION STEP IS LOAD-BEARING. `resolve_chat_model` only READS a model the run
+    already resolved (a contextvar); nothing in this agent resolved one, so every turn
+    failed "No BYOK model resolved for this run" — whatever the page's picker said. The
+    Security and Code Review agents had the same gap and the same fix. A resolution
+    failure is raised, not answered as chat: the handler ends the turn as failed with
+    the reason.
+    """
     from langchain_core.messages import SystemMessage
 
+    from shared.services.model_resolver import resolve_model_for_run, set_resolved_model
+
+    resolved = await resolve_model_for_run(
+        state.get("tenant_id") or "",
+        state.get("model_id"),
+        offering_id=state.get("offering_id"),
+        # Explicit: a None project filters every offering out.
+        project_id=state.get("project_id"),
+    )
+    set_resolved_model(resolved)
     model = _resolve_model(state)
     # Per-workspace agent-profile override (contextvar), falls back to the baked prompt.
     base = get_prompt_override("documentation") or DOC_SYSTEM_PROMPT
     messages = [SystemMessage(content=base)] + list(state["messages"])
     response = await model.ainvoke(messages)
-    return {"messages": [response]}
+    return {"messages": [response], "resolved_model": resolved}
+
+
+_tool_node = make_dynamic_tool_node(_tools, agent_id="documentation")
+
+
+async def tools_node(state: AgentState):
+    """Dispatch tools with the run's model re-established in this node's context."""
+    from shared.services.model_resolver import get_resolved_model, set_resolved_model
+
+    if get_resolved_model() is None and state.get("resolved_model") is not None:
+        set_resolved_model(state["resolved_model"])
+    return await _tool_node(state)
 
 
 def route_fn(state: AgentState) -> str:
@@ -153,7 +191,7 @@ def route_fn(state: AgentState) -> str:
 
 graph = StateGraph(AgentState)
 graph.add_node("agent", agent_node)
-graph.add_node("tools", make_dynamic_tool_node(_tools, agent_id="documentation"))
+graph.add_node("tools", tools_node)
 graph.add_edge(START, "agent")
 graph.add_conditional_edges("agent", route_fn, {"tools": "tools", END: END})
 graph.add_edge("tools", "agent")

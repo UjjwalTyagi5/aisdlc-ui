@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Eye, Pencil, PencilRuler } from "lucide-react";
+import { Check, ChevronsUpDown, Eye, Pencil, PencilRuler, Wand2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -236,6 +236,14 @@ function StageMultiSelect({
                     >
                       <Check className={cn("mr-2 size-4", checked ? "opacity-100" : "opacity-0")} />
                       <span className="flex-1">{o.label}</span>
+                      {/* The MCP group below has always rendered its hint; the
+                          connector group dropped it, which is why "no agent can use
+                          this yet" had nowhere to appear. */}
+                      {o.hint && (
+                        <span className="text-muted-foreground max-w-[18rem] text-right text-[10px] leading-tight">
+                          {o.hint}
+                        </span>
+                      )}
                     </CommandItem>
                   );
                 })}
@@ -328,9 +336,24 @@ export function ToolsStagePicker({
   // this must not wait on `installed`. `granted` is only populated when a
   // workspace is in view (see GET /connectors); with none, nothing is offered
   // rather than guessing — see workspaceId's own doc comment above.
+  // ASSIGNABLE IS NOT THE SAME AS USABLE. A granted connector with no agent tool
+  // behind it can be wired to a stage, stored, and enforced — and then nothing will
+  // ever act on it. That is how a PM agent came to tell a user it could only publish
+  // to SharePoint while Confluence sat granted and read-write in this very screen.
+  //
+  // Still OFFERED rather than hidden: a grant can serve another purpose (Slack and
+  // Teams are reached as notification targets, not as agent tools), and silently
+  // dropping a connector somebody deliberately granted is its own confusion. It is
+  // labelled instead, so the setting is available and its effect is not a surprise.
   const connectorOptions: Opt[] = (connectors.data ?? [])
     .filter((c) => c.granted === true)
-    .map((c) => ({ id: c.kind, label: connectorKindLabel(c.kind) }));
+    .map((c) => ({
+      id: c.kind,
+      label: connectorKindLabel(c.kind),
+      hint: c.agentToolsAvailable
+        ? undefined
+        : "No agent can use this yet — it can be assigned, but nothing will act on it.",
+    }));
 
   const toggle = (
     map: StageMap,
@@ -356,6 +379,42 @@ export function ToolsStagePicker({
     onAccessModeChange({ ...accessModeValue, [key]: mode });
   };
 
+  // GIVE ALL. Wiring seven tools to eight stages was fifty-six clicks in a popover
+  // that closes between them, and the project-creation dialog is where every project
+  // starts. Everything selected keeps the default mode (read & write, the same as
+  // ticking each tool by hand); modes already set stay set.
+  const allConnectorIds = connectorOptions.map((o) => o.id);
+  const allMcpIds = mcpOptions.map((o) => o.id);
+  const hasEverything = (stage: string) =>
+    allConnectorIds.every((id) => (connectorValue[stage] ?? []).includes(id)) &&
+    allMcpIds.every((id) => (mcpValue[stage] ?? []).includes(id));
+
+  const giveAll = (stage: string) => {
+    onConnectorChange({ ...connectorValue, [stage]: allConnectorIds });
+    onMcpChange({ ...mcpValue, [stage]: allMcpIds });
+  };
+  const clearStage = (stage: string) => {
+    onConnectorChange({ ...connectorValue, [stage]: [] });
+    onMcpChange({ ...mcpValue, [stage]: [] });
+    // The stage's access modes go with its tools, as a single un-tick drops its own.
+    onAccessModeChange(
+      Object.fromEntries(
+        Object.entries(accessModeValue).filter(([key]) => !key.startsWith(`${stage}::`)),
+      ),
+    );
+  };
+  const giveAllEverywhere = () => {
+    const conn = { ...connectorValue };
+    const mcp = { ...mcpValue };
+    for (const st of stages) {
+      conn[st.id] = allConnectorIds;
+      mcp[st.id] = allMcpIds;
+    }
+    onConnectorChange(conn);
+    onMcpChange(mcp);
+  };
+  const everyStageHasEverything = stages.every((st) => hasEverything(st.id));
+
   if (mcpOptions.length === 0 && connectorOptions.length === 0) {
     return (
       <p className="text-[12px] text-muted-foreground">
@@ -370,17 +429,42 @@ export function ToolsStagePicker({
 
   return (
     <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5 text-xs"
+          disabled={disabled || everyStageHasEverything}
+          onClick={giveAllEverywhere}
+        >
+          <Wand2 className="size-3.5" aria-hidden />
+          Give every stage all tools
+        </Button>
+      </div>
       {stages.map((st) => {
         const selectedConnectors = connectorValue[st.id] ?? [];
         const selectedMcp = mcpValue[st.id] ?? [];
         const chosenConn = connectorOptions.filter((o) => selectedConnectors.includes(o.id));
         const chosenMcp = mcpOptions.filter((o) => selectedMcp.includes(o.id));
+        const complete = hasEverything(st.id);
         return (
           <div
             key={st.id}
             className="grid grid-cols-1 items-start gap-2 sm:grid-cols-[130px_1fr]"
           >
-            <span className="pt-2 text-xs font-medium text-muted-foreground">{st.label}</span>
+            <div className="flex flex-col items-start gap-0.5 pt-2">
+              <span className="text-xs font-medium text-muted-foreground">{st.label}</span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => (complete ? clearStage(st.id) : giveAll(st.id))}
+                aria-label={complete ? `Clear all tools for ${st.label}` : `Give all tools to ${st.label}`}
+                className="text-brand-bright text-[11px] underline-offset-2 hover:underline disabled:opacity-50"
+              >
+                {complete ? "Clear all" : "Give all"}
+              </button>
+            </div>
             <div className="space-y-1.5">
               <StageMultiSelect
                 connectorOptions={connectorOptions}

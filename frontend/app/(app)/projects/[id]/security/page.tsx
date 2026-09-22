@@ -8,10 +8,11 @@ import {
   Check,
   ChevronDown,
   Copy,
-  FileText,
+  Download,
   GitBranch,
   GitPullRequest,
   ListChecks,
+  Loader2,
   MessageSquare,
   ScrollText,
   ShieldCheck,
@@ -22,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import {
@@ -33,13 +35,19 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
+import { ModelSelector } from "@/components/app/model-selector";
+import { Pill } from "@/components/app/report-primitives";
 import { ScanTargetDialog } from "@/components/app/scan-target-dialog";
 import { RequireRole } from "@/components/auth/require-role";
 import { useAgentChat } from "@/hooks/use-agent-chat";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
+import { useDocumentView } from "@/hooks/use-open-document";
+import { useRaiseForApproval } from "@/hooks/use-raise-for-approval";
 import { useSession } from "@/hooks/use-session";
+import { listArtifacts } from "@/lib/api/artifacts";
 import { getProject } from "@/lib/api/projects";
 import { listScans, getScan } from "@/lib/api/security";
+import { approvalState, type ReportApproval, reportDocumentFor } from "@/lib/documents/report-document";
 import { qk } from "@/lib/api/query-keys";
 import type {
   PrepareScanResult,
@@ -102,6 +110,18 @@ export default function SecurityPage() {
   const linkedSession = useChatDeepLink(setChatOpen);
   const [prepared, setPrepared] = React.useState<PrepareScanResult | null>(null);
   const [activeScanId, setActiveScanId] = React.useState<string | null>(null);
+  // The model this page's scan runs on. Without it the chat resolved with no model and ran
+  // on whichever provider connection came first — one whose key had been revoked.
+  const [agentModel, setAgentModel] = React.useState<string>();
+  // The project's documents — the SAME query the Documents panel reads, so a report
+  // raised or approved anywhere updates both the panel and the report's own header.
+  const documentsQ = useQuery({
+    queryKey: qk.artifacts.forProject(id),
+    queryFn: () => listArtifacts(id),
+  });
+  const approvals = useRaiseForApproval(id);
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(id);
 
   React.useEffect(() => {
     const newest = scansQ.data?.[0]?.id;
@@ -120,9 +140,15 @@ export default function SecurityPage() {
     // See the Code Review page: attachments are stored per session, so the durable
     // session has to exist before a file can be attached at all.
     projectId: id,
+    offeringId: agentModel,
     sessionKey: id,
     context: { page: "Security", project_id: id },
-    onArtifact: () => scansQ.refetch(),
+    // A turn can save a scan, file its report, or send that report for approval — the
+    // last changes no scan, only the document's status, so both lists refresh.
+    onArtifact: () => {
+      void scansQ.refetch();
+      void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+    },
   });
 
   const prevBusy = React.useRef(chat.busy);
@@ -222,6 +248,12 @@ export default function SecurityPage() {
                 }}
               />
             )}
+            <ModelSelector
+              aria-label="Security agent model"
+              projectId={id}
+              value={agentModel}
+              onValueChange={setAgentModel}
+            />
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <ShieldCheck className="size-4" aria-hidden />
               Select target
@@ -240,81 +272,94 @@ export default function SecurityPage() {
         </div>
       </div>
 
-      {/* DOCUMENTS DO NOT DEPEND ON A SCAN, so the no-scan state cannot swallow them.
-          The first version of this tab lived inside the branch below and was therefore
-          unreachable on exactly the projects that have no scan yet — which is every new
-          one. A document can be uploaded and approved for this stage before any scan
-          has ever run. */}
-      {!prepared && !hasScan && !scansQ.isLoading ? (
-        <div className="flex-1 overflow-auto">
-          <div className="mx-auto max-w-xl px-4 py-12">
-            <EmptyState
-              icon={ShieldCheck}
-              title="No scan yet"
-              description="Select a branch or an open PR, then run the scan. Findings, an SBOM, a risk score, and a sign-off decision appear here."
-              action={
-                <Button onClick={() => setPickerOpen(true)}>
-                  <ShieldCheck className="size-4" aria-hidden />
-                  Select target
-                </Button>
-              }
-            />
-            {/* Shown, not tabbed away behind a bar whose other tabs do not exist here.
-                A lone unselected tab beside an empty state reads as broken. */}
-            <div className="mt-10">
-              <DocumentList projectId={id} stage="security" />
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center gap-1 border-b px-2 py-1.5">
-            <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} icon={ScrollText}>
-              Summary
-            </TabBtn>
-            <TabBtn active={tab === "findings"} onClick={() => setTab("findings")} icon={ListChecks}>
-              Findings
-              {artifact && artifact.findings.length > 0 && (
-                <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
-                  {artifact.findings.length}
-                </span>
-              )}
-            </TabBtn>
-            <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
-              SBOM
-              {artifact && artifact.sbom.length > 0 && (
-                <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
-                  {artifact.sbom.length}
-                </span>
-              )}
-            </TabBtn>
-            {/* DOCUMENTS AS A TAB, because this page has no side column to put them in
-                — it is a scan viewer, full width. Every other stage screen shows the
-                project's documents for its own agent; this one showed none, so a
-                Security document could be uploaded and approved with nowhere on the
-                Security page to see it. */}
-            <TabBtn active={tab === "documents"} onClick={() => setTab("documents")} icon={FileText}>
-              Documents
-            </TabBtn>
-          </div>
+      {/* THE DOCUMENTS PANEL SITS BESIDE THE SCAN, as on Requirements and Code Review. It
+          was a tab, or a list under the empty state — so raising the report for approval
+          meant leaving the report to find it. Documents do not depend on a scan either,
+          so the panel is there on every state of the page. */}
+      <div className="grid min-h-0 flex-1 gap-0 overflow-hidden md:grid-cols-[340px_1fr] xl:grid-cols-[360px_1fr]">
+        <aside
+          aria-label="Documents"
+          className="flex min-h-0 flex-col overflow-auto border-b p-3 md:border-b-0 md:border-r"
+        >
+          <DocumentList projectId={id} stage="security" className="flex min-h-0 flex-1 flex-col" fillHeight selectedId={docView.openId} onSelect={docView.select} />
+        </aside>
 
-          <div className="min-h-0 flex-1 overflow-auto">
-            {scanQ.isLoading && activeScanId ? (
-              <LoadingState variant="card" />
-            ) : tab === "summary" ? (
-              <SummaryView artifact={artifact} busy={chat.busy} />
-            ) : tab === "findings" ? (
-              <FindingsView artifact={artifact} />
-            ) : tab === "documents" ? (
-              <div className="p-4">
-                <DocumentList projectId={id} stage="security" />
-              </div>
-            ) : (
-              <SbomView artifact={artifact} />
-            )}
+        {/* AN OPEN DOCUMENT SITS OVER THE PAGE'S OWN VIEW, which stays mounted underneath —
+            closing it returns to exactly where the work was. */}
+        {docView.openDoc && (
+          <div className="flex min-h-0 flex-col overflow-hidden">
+            <DocumentPreview artifact={docView.openDoc} project={projectQ.data?.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Security" className="min-h-0 flex-1 overflow-auto" />
           </div>
+        )}
+        <div className={cn("flex min-h-0 flex-col overflow-hidden", docView.openDoc && "hidden")}>
+          {!prepared && !hasScan && !scansQ.isLoading ? (
+            <div className="flex-1 overflow-auto">
+              <div className="mx-auto max-w-xl px-4 py-12">
+                <EmptyState
+                  icon={ShieldCheck}
+                  title="No scan yet"
+                  description="Select a branch or an open PR, then run the scan. Findings, an SBOM, a risk score, and a sign-off decision appear here."
+                  action={
+                    <Button onClick={() => setPickerOpen(true)}>
+                      <ShieldCheck className="size-4" aria-hidden />
+                      Select target
+                    </Button>
+                  }
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex items-center gap-1 border-b px-2 py-1.5">
+                <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} icon={ScrollText}>
+                  Summary
+                </TabBtn>
+                <TabBtn active={tab === "findings"} onClick={() => setTab("findings")} icon={ListChecks}>
+                  Findings
+                  {artifact && artifact.findings.length > 0 && (
+                    <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
+                      {artifact.findings.length}
+                    </span>
+                  )}
+                </TabBtn>
+                <TabBtn active={tab === "sbom"} onClick={() => setTab("sbom")} icon={Boxes}>
+                  SBOM
+                  {artifact && artifact.sbom.length > 0 && (
+                    <span className="bg-muted text-muted-foreground ml-1 rounded-full px-1.5 text-[10px]">
+                      {artifact.sbom.length}
+                    </span>
+                  )}
+                </TabBtn>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-auto">
+                {scanQ.isLoading && activeScanId ? (
+                  <LoadingState variant="card" />
+                ) : tab === "summary" ? (
+                  <SummaryView
+                    artifact={artifact}
+                    busy={chat.busy}
+                    approval={artifact ? (() => {
+                      const document = reportDocumentFor(artifact, documentsQ.data, "security");
+                      return {
+                        document,
+                        mayRaise: approvals.mayRaise("security"),
+                        raising: !!document && approvals.raisingId === document.id,
+                        onRaise: () => document && approvals.raise(document),
+                      };
+                    })() : undefined}
+                  />
+                ) : tab === "findings" ? (
+                  <FindingsView artifact={artifact} />
+                ) : (
+                  <SbomView artifact={artifact} />
+                )}
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       <ScanTargetDialog
         open={pickerOpen}
@@ -331,6 +376,10 @@ export default function SecurityPage() {
         onSend={chat.send}
         busy={chat.busy}
         onStop={chat.cancel}
+        sessions={chat.sessions}
+        activeSessionId={chat.sessionId}
+        onSelectSession={chat.selectSession}
+        onNewChat={chat.newChat}
         attachments={chat.attachments}
         onAttachFiles={chat.attachFiles}
         onRemoveAttachment={chat.removeAttachment}
@@ -340,7 +389,7 @@ export default function SecurityPage() {
         starterSuggestions={[
           "Run the security scan and submit your review.",
           "Focus on dependency CVEs and secrets.",
-          "Is this branch safe to deploy?",
+          "Send the security report for approval.",
         ]}
       />
     </div>
@@ -413,7 +462,11 @@ function ScanSwitcher({
   );
 }
 
-function SummaryView({ artifact, busy }: { artifact: SecurityArtifact | null; busy: boolean }) {
+function SummaryView({ artifact, busy, approval }: {
+  artifact: SecurityArtifact | null;
+  busy: boolean;
+  approval?: ReportApproval;
+}) {
   if (!artifact) {
     return (
       <div className="mx-auto max-w-xl px-4 py-12">
@@ -444,6 +497,33 @@ function SummaryView({ artifact, busy }: { artifact: SecurityArtifact | null; bu
         <span className="text-muted-foreground text-xs">
           {m.total} findings · {m.critical} critical · {m.high} high
         </span>
+      </div>
+
+      {/* THE FILED REPORT, its approval state and the way to send it — the same pattern
+          as the Code Review report. Without this the scan's document was one draft among
+          the panel's rows and nothing on the scan said whether it had been raised. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {approval?.document && (
+          <Pill tone={approvalState(approval.document).tone} className="px-2.5 py-1 text-xs">
+            {approvalState(approval.document).label}
+          </Pill>
+        )}
+        {approval?.document && approval.document.status === "draft" && approval.mayRaise && (
+          <Button size="sm" className="h-8 gap-1.5 text-xs" disabled={approval.raising} onClick={approval.onRaise}>
+            {approval.raising && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+            Raise for approval
+          </Button>
+        )}
+        {artifact.document.url ? (
+          <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+            <a href={artifact.document.url} download>
+              <Download className="size-3.5" aria-hidden />
+              Download report
+            </a>
+          </Button>
+        ) : artifact.document.error ? (
+          <Pill tone="danger" className="max-w-xs whitespace-normal">{artifact.document.error}</Pill>
+        ) : null}
       </div>
 
       {artifact.signoff.rationale && (

@@ -253,6 +253,13 @@ def _map_list_item(t: dict) -> TraceListItemOut:
         status=None,
         startedAt=str(t.get("timestamp") or _now_iso()),
         latencyMs=_ms(t.get("latency")),
+        # ZERO MEANS "NOT ASKED", NOT "NONE USED", and it is invisible either way: the
+        # traces table renders `cost.usd` only. Langfuse's trace-LIST response carries
+        # no usage at all — no `usage`, no `usageDetails`, and `observations` comes back
+        # as a list of STRING IDS rather than objects (verified against the live API on
+        # 2026-09-15) — so tokens here would cost one extra fetch per row. The detail
+        # endpoint fetches the observations anyway and sums them there; do not "fix"
+        # this into an N+1 over the page for a number nothing displays.
         cost=CostOut(usd=float(t.get("totalCost") or 0.0), inputTokens=0, outputTokens=0),
         model=str(meta.get("model") or ""),
         spanCount=len(observations),

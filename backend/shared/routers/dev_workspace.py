@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.authz.project_scope import require_project_access
-from shared.authz.agent_access import require_agent_access
+from shared.authz.agent_access import require_agent_access, require_any_agent_access
 from shared.db import get_db_session
 from shared.models.orm import Run
 from shared.services import ado_repos
@@ -41,6 +41,26 @@ dev_workspace_router = APIRouter(
     dependencies=[
         Depends(require_project_access()),
         Depends(require_agent_access("development")),
+    ]
+)
+
+#: The agents whose pages open a repo target dialog — every one of them lists the
+#: same sources, projects, repos and branches through the cascade below.
+REPO_PICKER_AGENTS = (
+    "development", "code_review", "security", "testing", "deployment", "documentation",
+)
+
+# THE PICKER IS NOT THE DEVELOPMENT AGENT'S. The four browse routes below feed every
+# target dialog on the platform, and a caller who reaches Code Review but not
+# Development — a QA granted it, or the Architect who owns it — was refused with
+# 403 and shown "No Azure DevOps projects found". They browse only what the caller's
+# own credential can see, so reaching ANY repo-using agent on the project is the
+# right gate; the routes that DO something (pull a workspace, read its tree) keep
+# the Development gate above.
+repo_picker_router = APIRouter(
+    dependencies=[
+        Depends(require_project_access()),
+        Depends(require_any_agent_access(*REPO_PICKER_AGENTS)),
     ]
 )
 
@@ -64,7 +84,7 @@ class PullRequest(BaseModel):
 # exactly as it did, and only a dialog that has offered somebody a choice sends one.
 
 
-@dev_workspace_router.get("/{project_id}/ado/projects")
+@repo_picker_router.get("/{project_id}/ado/projects")
 async def get_ado_projects(
     project_id: str, request: Request, provider: str | None = None
 ) -> list[dict]:
@@ -82,7 +102,7 @@ async def get_ado_projects(
     return rows
 
 
-@dev_workspace_router.get("/{project_id}/ado/projects/{ado_project}/repos")
+@repo_picker_router.get("/{project_id}/ado/projects/{ado_project}/repos")
 async def get_ado_repos(
     project_id: str, ado_project: str, request: Request, provider: str | None = None
 ) -> list[dict]:
@@ -99,7 +119,7 @@ async def get_ado_repos(
     return rows
 
 
-@dev_workspace_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/branches")
+@repo_picker_router.get("/{project_id}/ado/repos/{ado_project}/{repo}/branches")
 async def get_ado_branches(
     project_id: str, ado_project: str, repo: str, request: Request,
     provider: str | None = None,
@@ -117,7 +137,7 @@ async def get_ado_branches(
     return rows
 
 
-@dev_workspace_router.get("/{project_id}/sources")
+@repo_picker_router.get("/{project_id}/sources")
 async def get_sources(project_id: str, request: Request) -> dict:
     """Which source hosts this caller can actually clone from, for the target dialogs.
 

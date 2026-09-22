@@ -148,7 +148,7 @@ async def inspect_repo() -> str:
     })
 
 
-async def _latest_run_column(tenant_id: str, project_id: str, column: str):
+async def _latest_run_column(tenant_id: str, project_id: str, column: str, repo_name: str = ""):
     """The project's latest non-null value for one `runs` column.
 
     THE PRE-PHASE-3 BEHAVIOUR, kept verbatim and used unchanged when a project has not
@@ -159,13 +159,18 @@ async def _latest_run_column(tenant_id: str, project_id: str, column: str):
     from shared.db import get_db_session_for_tenant
     from shared.models.orm import Run
 
+    from shared.services.upstream_results import other_repo  # noqa: PLC0415
+
     async with get_db_session_for_tenant(tenant_id) as db:
         col = getattr(Run, column)
-        return (await db.execute(
+        recent = (await db.execute(
             select(col)
             .where(Run.project_id == uuid.UUID(project_id), col.isnot(None))
-            .order_by(Run.created_at.desc()).limit(1)
-        )).scalars().first()
+            .order_by(Run.created_at.desc()).limit(25 if repo_name else 1)
+        )).scalars().all()
+    # The newest result FOR THE REPOSITORY BEING DEPLOYED — a security result about
+    # another repository is no evidence about this one.
+    return next((r for r in recent if not other_repo(r, repo_name)), None)
 
 
 @tool
@@ -184,16 +189,29 @@ async def read_upstream_artifacts() -> str:
     if not s.tenant_id or not s.project_id:
         return json.dumps(out)
 
+    from shared.services.upstream_results import compact, other_repo  # noqa: PLC0415
+
     for stage, column in (("testing", "testing_artifacts"),
                           ("security", "security_artifacts")):
         result = await read_upstream_for_agent(
             tenant_id=s.tenant_id, project_id=s.project_id, stage=stage,
             consumer_stage="deployment",
-            legacy_reader=lambda c=column: _latest_run_column(s.tenant_id, s.project_id, c),
+            legacy_reader=lambda c=column: _latest_run_column(s.tenant_id, s.project_id, c, s.repo_name),
         )
         # `None` alone cannot distinguish "not produced" from "produced but not
         # approved", and an agent told only `null` will assume the former and proceed.
         out[stage] = result.payload if result.found else None
+        elsewhere = other_repo(out[stage], s.repo_name)
+        if elsewhere:
+            out[stage] = None
+            out[f"{stage}_status"] = (
+                f"The {stage} result on file describes {elsewhere}, not {s.repo_name}; it is no "
+                f"evidence about this release. Treat the {stage} gate as unmeasured."
+            )
+            continue
+        # A LIVE READINESS REPORT SAID "zero high vulns" about a branch with a critical
+        # CVE: the ~170 KB security result was cut at 12 KB, mid-SBOM. See compact.
+        out[stage] = compact(stage, out[stage])
         if not result.found and not result.unenforced:
             out[f"{stage}_status"] = describe(result)
     return json.dumps(out, default=str)[:12000]

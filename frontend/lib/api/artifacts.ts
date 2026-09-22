@@ -148,3 +148,59 @@ export async function uploadArtifact(
   }
   return Artifact.parse(body);
 }
+
+/** The document's page copy — what the app renders as a report. See
+ *  backend `GET /artifacts/{id}/page`: 404 when the document has no page copy (an
+ *  upload, or one generated before page copies were kept), 410 once rejected. */
+export const ArtifactPage = z.object({
+  artifactId: z.string(),
+  filename: z.string(),
+  status: z.string(),
+  markdown: z.string(),
+  /** True when the backend read the text back from the Word file because the document
+   *  has no page copy — a preview of the file, not the markdown its agent wrote. */
+  derived: z.boolean().default(false),
+});
+export type ArtifactPage = z.infer<typeof ArtifactPage>;
+
+export const getArtifactPage = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}/page`, { schema: ArtifactPage });
+
+/** One sheet of a workbook, as the page lays it out: display strings, in rows. */
+export const PreviewSheet = z.object({
+  name: z.string(),
+  rows: z.array(z.array(z.string())).default([]),
+  rows_total: z.number().default(0),
+  cols_total: z.number().default(0),
+  truncated: z.boolean().default(false),
+});
+export type PreviewSheet = z.infer<typeof PreviewSheet>;
+
+const PreviewBase = { artifactId: z.string(), filename: z.string(), status: z.string() };
+
+/** Any document as the page can show it — backend `GET /artifacts/{id}/preview`:
+ *    sheets    a workbook's (or a CSV's) sheets
+ *    markdown  a document's text: its page copy, or read from the Word file or the slides
+ *              (`derivedFrom`), or a markdown / text file itself
+ *    html      an HTML report, for a sandboxed frame
+ *    file      a PDF or an image, whose bytes come from `artifactPreviewFileUrl`
+ *  404 means this kind of file has no view; 410 means it was rejected and deleted. */
+export const ArtifactPreview = z.discriminatedUnion("kind", [
+  z.object({ ...PreviewBase, kind: z.literal("sheets"), sheets: z.array(PreviewSheet) }),
+  z.object({
+    ...PreviewBase,
+    kind: z.literal("markdown"),
+    markdown: z.string(),
+    derived: z.boolean().default(false),
+    derivedFrom: z.enum(["word", "slides"]).optional(),
+  }),
+  z.object({ ...PreviewBase, kind: z.literal("html"), html: z.string(), truncated: z.boolean().default(false) }),
+  z.object({ ...PreviewBase, kind: z.literal("file"), media: z.enum(["pdf", "image"]), contentType: z.string() }),
+]);
+export type ArtifactPreview = z.infer<typeof ArtifactPreview>;
+
+export const getArtifactPreview = (id: ArtifactId) =>
+  api(`/artifacts/${encodeURIComponent(id)}/preview`, { schema: ArtifactPreview });
+
+/** Same-origin URL of a `file` preview's bytes (a PDF or an image), for the page to draw. */
+export const artifactPreviewFileUrl = (id: string) => `/api/artifacts/${encodeURIComponent(id)}/preview/file`;
