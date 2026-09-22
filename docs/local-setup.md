@@ -200,18 +200,43 @@ doing their job, not bugs.
 Every document an agent generates (a BRD, a design, a QA report) is stored as bytes and
 referenced from an `artifacts` row. Two backends, chosen in `shared/storage/__init__.py`:
 
-| `backend/.env`                              | Storage                                  |
-|---------------------------------------------|------------------------------------------|
-| `AZURE_BLOB_ACCOUNT_URL` set                | Azure Blob Storage (the deployed setup)  |
-| blank, and `ARTIFACT_STORAGE_ROOT` set      | a directory on this machine              |
-| both blank                                  | nothing — rows record `blob_url = None`  |
+| `backend/.env`                                          | Storage                                 |
+|---------------------------------------------------------|-----------------------------------------|
+| `STORAGE_BACKEND=local` or `=azure`                     | exactly that, whatever else is set      |
+| `ENV=dev` and `ARTIFACT_STORAGE_ROOT` set               | a directory on this machine             |
+| otherwise, `AZURE_BLOB_ACCOUNT_URL` set                 | Azure Blob Storage (the deployed setup) |
+| otherwise, `ARTIFACT_STORAGE_ROOT` set                  | a directory on this machine             |
+| nothing set                                             | nothing — rows record `blob_url = None` |
 
-For local work set `ARTIFACT_STORAGE_ROOT=files/artifact-store`. The full lifecycle —
-approval, download, the agents' `read_document`, publishing to SharePoint or Confluence
-— works against it; only evidence export (which mints Azure SAS links) answers 503.
-Azure wins when both are set. The two are not synchronised: a document stored on disk
-stays on disk when you point the backend back at Azure, and vice versa — a row whose
-bytes live in the other backend downloads as "could not be retrieved".
+For local work set `ARTIFACT_STORAGE_ROOT=files/artifact-store` (absolute paths work too;
+a relative one is resolved against `backend/`). In dev that wins even with an Azure account
+configured, so you can keep the account's settings in `.env` for the days you want them —
+`STORAGE_BACKEND=azure` pins Azure again without deleting anything.
+
+Under the root, every document lands in the same layout the blob names use —
+`tenant/unit/project/stage/run/document/<id>/<file>`, and unapproved documents under the
+tenant's `_pending/` prefix — so the same `blob_path` resolves in either backend. The full
+lifecycle works: approval (which moves the bytes out of `_pending/`), download, preview,
+the agents' `read_document`, publishing to SharePoint or Confluence. Only evidence export
+answers 503, because it mints Azure SAS links and a directory has no equivalent.
+
+**The two backends do not share bytes.** Switching without copying hides everything the
+other one holds: downloads 404, previews report a missing file, and an agent asking for an
+approved document is told it could not be retrieved. Before any switch, in either
+direction:
+
+```powershell
+cd backend
+# look first — nothing is written without --apply
+.venv\Scripts\python.exe scripts\mirror_artifact_storage.py --direction azure-to-local
+.venv\Scripts\python.exe scripts\mirror_artifact_storage.py --direction azure-to-local --apply
+# and afterwards, check the whole lifecycle against the backend now in use
+.venv\Scripts\python.exe scripts\verify_artifact_storage.py
+```
+
+The mirror copies names exactly (`_pending/` included), skips files already identical, never
+overwrites one that differs, and deletes nothing — so both sides keep a copy and you can
+switch back.
 
 ## 5. Seed the dev data
 

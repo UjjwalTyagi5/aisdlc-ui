@@ -131,9 +131,16 @@ REDIS_URL = os.environ.get("REDIS_URL", "")
 # Azure Blob Storage account URL (https://<account>.blob.core.windows.net)
 AZURE_BLOB_ACCOUNT_URL = os.environ.get("AZURE_BLOB_ACCOUNT_URL", "")
 # A directory to store generated documents in INSTEAD of Azure Blob Storage — the
-# local-dev and demo backend. Only consulted when AZURE_BLOB_ACCOUNT_URL is blank;
-# relative to backend/. See shared/storage/local_blob.py for what it does not do.
+# local-dev and demo backend. Absolute, or relative to backend/. Every document lands
+# under it in the same tenant/unit/project/stage/run/document layout the blob names use,
+# unapproved ones under the tenant's `_pending/` prefix.
+# See shared/storage/local_blob.py for what it does not do (no SAS links).
 ARTIFACT_STORAGE_ROOT = os.environ.get("ARTIFACT_STORAGE_ROOT", "")
+# Which backend to use: "auto" (default), "local" or "azure". `auto` means the local root
+# when ENV=dev and one is set, otherwise Azure when it is configured. Set it explicitly to
+# pin one without deleting the other's settings. See shared/storage/__init__.py, and run
+# scripts/mirror_artifact_storage.py before switching — the backends do not share bytes.
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "auto")
 
 # Azure Key Vault URL (https://<vault-name>.vault.azure.net)
 # PLATFORM vault: secrets the app only ever READS (JWT signing key, Redis URL, webhook

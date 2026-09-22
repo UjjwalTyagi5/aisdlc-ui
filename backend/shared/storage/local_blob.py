@@ -16,11 +16,12 @@ this. Callers catch broadly, so the exception type is not load-bearing, but keep
 shapes identical is what lets the factory swap one for the other unnoticed.
 
 THE BLOB NAME IS THE ONLY ISOLATION. Blob storage is a flat namespace whose first
-segment is the tenant id, and `is_blob_path` tests exactly that prefix. On a
-filesystem a `..` inside a name would walk out of the tenant's tree and out of the
-root, so every name is resolved and checked to lie under `root` before any I/O — and
-refused with `ValueError` otherwise. `artifact_store.blob_path_for` sanitises every
-segment already; this is the second lock on the same door.
+segment is the tenant id, and `is_blob_path` tests exactly that prefix. On a filesystem
+a `..` inside a name walks somewhere else — out of the root, or (just as bad, and it
+still passes a root check) sideways into another tenant's tree. So a name with a `..`
+segment is refused outright, and every name is also resolved and checked to lie under
+`root` before any I/O; both raise `ValueError`. `artifact_store.blob_path_for` sanitises
+every segment already; this is the second lock on the same door.
 
 NOT FOR PRODUCTION. One directory on one machine has no replication, no access
 policy and no SAS links (evidence export answers 503 on this backend). It is the
@@ -60,6 +61,13 @@ class LocalBlobStorageClient:
         name = (blob_name or "").strip()
         if not name or name.startswith(("/", "\\")) or os.path.isabs(name) or ":" in name:
             raise ValueError(f"blob name is not a relative path: {blob_name!r}")
+        # A `..` SEGMENT IS REFUSED, not normalised, even when it lands back inside the
+        # root: `tenant-a/../tenant-b/x.docx` resolves into ANOTHER TENANT'S tree while
+        # passing the root check below. Azure keeps such a name literal — one blob, oddly
+        # named — so normalising here would also make the two backends disagree about
+        # which file a stored `blob_path` means.
+        if any(part == ".." for part in name.replace("\\", "/").split("/")):
+            raise ValueError(f"blob name contains a '..' segment: {blob_name!r}")
         candidate = (self.root / name).resolve()
         try:
             candidate.relative_to(self.root)

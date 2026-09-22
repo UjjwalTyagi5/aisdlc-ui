@@ -16,8 +16,9 @@ What is pinned:
   * `move_blob` — what approval relies on — copies, verifies, then removes the source;
   * a blob name that escapes the root is refused, because the tenant prefix on the
     blob name is the only isolation there is and a `..` would walk past it;
-  * `build_blob_client` prefers Azure when it is configured, falls back to the local
-    root when that is configured instead, and returns None when neither is.
+  * `build_blob_client` picks the backend: the local root in dev (and whenever Azure is
+    not configured), Azure elsewhere, an explicit `STORAGE_BACKEND` over both, and a
+    refusal rather than the other backend when the one asked for cannot be built.
 """
 from __future__ import annotations
 
@@ -106,6 +107,21 @@ async def test_a_name_that_escapes_the_root_is_refused(client, tmp_path, name):
     assert not (tmp_path / "outside.bin").exists()
 
 
+async def test_a_name_that_walks_sideways_into_another_tenant_is_refused(client, tmp_path):
+    """`..` back INSIDE the root still lands in another tenant's tree, and passes a check
+    that only asks whether the path stays under the root. Azure keeps such a name literal,
+    so resolving it here would also make the two backends disagree about which file a
+    stored `blob_path` means."""
+    other = "33333333-3333-3333-3333-333333333333"
+    sideways = f"{_TENANT}/../{other}/design/run/document/stolen.docx"
+
+    with pytest.raises(ValueError):
+        await client.upload_bytes(b"x", sideways)
+    with pytest.raises(ValueError):
+        await client.download_bytes(sideways)
+    assert not (tmp_path / other).exists()
+
+
 async def test_the_probe_says_ok_when_the_root_is_writable(client):
     assert await client.probe() == "ok"
 
@@ -117,27 +133,80 @@ async def test_close_is_a_no_op(client):
 # ── the factory ─────────────────────────────────────────────────────────────
 
 
-def test_the_factory_prefers_azure_when_it_is_configured(monkeypatch, tmp_path):
+class _FakeAzure:
+    """Stands in for the Azure client so the factory can be tested without an account."""
+
+
+def _configure(monkeypatch, *, env="prod", backend="auto", azure="https://acct.blob.core.windows.net/", root=""):
     from shared import storage
 
-    built = {}
-
-    class _FakeAzure:
-        def __init__(self):
-            built["azure"] = True
-
-    monkeypatch.setattr(storage, "AZURE_BLOB_ACCOUNT_URL", "https://acct.blob.core.windows.net/")
-    monkeypatch.setattr(storage, "ARTIFACT_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(storage, "ENV", env)
+    monkeypatch.setattr(storage, "STORAGE_BACKEND", backend)
+    monkeypatch.setattr(storage, "AZURE_BLOB_ACCOUNT_URL", azure)
+    monkeypatch.setattr(storage, "ARTIFACT_STORAGE_ROOT", str(root))
     monkeypatch.setattr(storage, "BlobStorageClient", _FakeAzure)
+    return storage
+
+
+def test_the_factory_prefers_azure_when_it_is_configured(monkeypatch, tmp_path):
+    """Outside dev: a deployment with a storage account is not running a demo, so a stray
+    local root must not divert its documents onto one machine's disk."""
+    storage = _configure(monkeypatch, env="prod", root=tmp_path)
 
     assert isinstance(storage.build_blob_client(), _FakeAzure)
 
 
-def test_the_factory_falls_back_to_the_local_root(monkeypatch, tmp_path):
-    from shared import storage
+def test_in_dev_the_local_root_wins_even_with_an_account_configured(monkeypatch, tmp_path):
+    """A developer with both set means the directory. Keeping the account configured is how
+    they switch back, and splitting a project's documents across two backends is what lost
+    track of approved files on the earlier switches."""
+    storage = _configure(monkeypatch, env="dev", root=tmp_path / "artifact-store")
 
-    monkeypatch.setattr(storage, "AZURE_BLOB_ACCOUNT_URL", "")
-    monkeypatch.setattr(storage, "ARTIFACT_STORAGE_ROOT", str(tmp_path / "artifact-store"))
+    client = storage.build_blob_client()
+
+    assert isinstance(client, LocalBlobStorageClient)
+    assert client.root == (tmp_path / "artifact-store").resolve()
+
+
+def test_in_dev_without_a_root_azure_is_still_used(monkeypatch):
+    storage = _configure(monkeypatch, env="dev", root="")
+
+    assert isinstance(storage.build_blob_client(), _FakeAzure)
+
+
+def test_an_explicit_backend_is_honoured_over_everything(monkeypatch, tmp_path):
+    storage = _configure(monkeypatch, env="dev", backend="azure", root=tmp_path)
+    assert isinstance(storage.build_blob_client(), _FakeAzure), "STORAGE_BACKEND=azure pins Azure in dev"
+
+    storage = _configure(monkeypatch, env="prod", backend="local", root=tmp_path)
+    assert isinstance(storage.build_blob_client(), LocalBlobStorageClient)
+
+
+def test_an_impossible_request_is_refused_rather_than_swapped(monkeypatch, caplog):
+    """STORAGE_BACKEND=local with nowhere to write is a misconfiguration; falling back to
+    Azure would write a demo's documents into a cloud account nobody asked for."""
+    storage = _configure(monkeypatch, env="prod", backend="local", root="")
+
+    with caplog.at_level("ERROR"):
+        assert storage.build_blob_client() is None
+    assert "ARTIFACT_STORAGE_ROOT is not set" in caplog.text
+
+    storage = _configure(monkeypatch, env="prod", backend="azure", azure="", root=str("x"))
+    with caplog.at_level("ERROR"):
+        assert storage.build_blob_client() is None
+    assert "AZURE_BLOB_ACCOUNT_URL is not set" in caplog.text
+
+
+def test_an_unknown_backend_name_is_treated_as_auto_and_says_so(monkeypatch, tmp_path, caplog):
+    storage = _configure(monkeypatch, env="dev", backend="blob-ish", root=tmp_path)
+
+    with caplog.at_level("WARNING"):
+        assert isinstance(storage.build_blob_client(), LocalBlobStorageClient)
+    assert "treating it as auto" in caplog.text
+
+
+def test_the_factory_falls_back_to_the_local_root(monkeypatch, tmp_path):
+    storage = _configure(monkeypatch, env="prod", azure="", root=tmp_path / "artifact-store")
 
     client = storage.build_blob_client()
 
@@ -146,10 +215,7 @@ def test_the_factory_falls_back_to_the_local_root(monkeypatch, tmp_path):
 
 
 def test_the_factory_returns_none_when_neither_is_configured(monkeypatch):
-    from shared import storage
-
-    monkeypatch.setattr(storage, "AZURE_BLOB_ACCOUNT_URL", "")
-    monkeypatch.setattr(storage, "ARTIFACT_STORAGE_ROOT", "")
+    storage = _configure(monkeypatch, env="prod", azure="", root="")
 
     assert storage.build_blob_client() is None
 
