@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AgentProfileSummaryEntry, ProfileScope } from "@/lib/schemas/agent-profiles";
@@ -8,6 +9,7 @@ import type { AgentProfileSummaryEntry, ProfileScope } from "@/lib/schemas/agent
 import { agentLabel } from "./agents";
 import { BehaviorTab } from "./behavior-tab";
 import { SkillsTab } from "./skills-tab";
+import { TechStackPanel } from "./tech-stack-panel";
 
 /**
  * Everything BehaviorTab needs to know about which cascade tier it's editing
@@ -43,6 +45,8 @@ export interface AgentEditorProps {
 
 export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
   const label = agentLabel(summary.agent_id);
+  // `?tab=skills` opens straight on Skills — the Design page's tech-stack chip links here.
+  const initialTab = useSearchParams().get("tab") === "skills" ? "skills" : "behavior";
 
   return (
     <div className="space-y-4">
@@ -53,7 +57,7 @@ export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
         </p>
       </div>
 
-      <Tabs defaultValue="behavior">
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="behavior">Behavior</TabsTrigger>
           <TabsTrigger value="skills">Skills</TabsTrigger>
@@ -71,6 +75,11 @@ export function AgentEditor({ summary, scopeContext }: AgentEditorProps) {
         </TabsContent>
 
         <TabsContent value="skills" className="mt-4">
+          {/* The project's tech stack sits above this agent's own skills: it is one choice
+              that every agent follows, shown the same on each agent's Skills tab. */}
+          <div className="mb-6">
+            <TechStackPanel scopeContext={scopeContext} />
+          </div>
           {/* key=agentId+scope remounts the tab so dialog/toggle state resets
               cleanly on an agent OR tier switch (mirrors BehaviorTab's own key
               above) */}

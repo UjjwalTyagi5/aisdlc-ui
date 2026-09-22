@@ -146,6 +146,13 @@ export const qk = {
     versions: (agentId: string, scope: string, scopeId?: string | null) =>
       ["agent-profiles", "versions", agentId, scope, scopeId ?? ""] as const,
   },
+  techStacks: {
+    /** Every tech-stack query — invalidated whole after any write. */
+    all: ["tech-stacks"] as const,
+    catalog: () => ["tech-stacks", "catalog"] as const,
+    businessUnit: (workspaceId: string) => ["tech-stacks", "business-unit", workspaceId] as const,
+    project: (projectId: string) => ["tech-stacks", "project", projectId] as const,
+  },
   agentSkills: {
     list: (agentId: string, scope: string, scopeId?: string | null) =>
       ["agent-skills", "list", agentId, scope, scopeId ?? ""] as const,

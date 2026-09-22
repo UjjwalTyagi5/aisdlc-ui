@@ -26,7 +26,7 @@ import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import requests
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from config.checkpoint import build_checkpointer as _build_checkpointer
 from langgraph.graph import END, StateGraph
@@ -565,6 +565,73 @@ _GENERATION_SYSTEM = (
 )
 
 
+def _tech_stack_receipt(meta: dict) -> str:
+    """What the agent tells the user about the stack the sections were held to."""
+    from shared.services.tech_stack import SOURCE_LABELS  # noqa: PLC0415
+
+    lines = []
+    if meta.get("tech_stack"):
+        source = meta.get("tech_stack_source") or ""
+        lines.append(f"Tech stack applied: {meta['tech_stack']} ({SOURCE_LABELS.get(source, source)}).")
+    if meta.get("tech_stack_warning"):
+        lines.append(f"Tech stack note for the user: {meta['tech_stack_warning']}")
+    if meta.get("outside_stack"):
+        lines.append("Tell the user: after one correction the technology stack table still names technologies "
+                     "outside the project's tech stack — " + ", ".join(meta["outside_stack"])
+                     + ". They are flagged in the document.")
+    return ("\n".join(lines) + "\n\n") if lines else ""
+
+
+async def generate_section_text(
+    source_label: str, source_text: str, ids: List[str], custom_prompt: str, existing: str,
+) -> "tuple[str, dict]":
+    """The model call behind every generate tool: these sections, held to the project's tech stack.
+
+    THE STACK IS CHOSEN HERE, in this call's own prompt — not in the chat, whose skills and
+    instructions never reached it. When the Technology Stack section is produced, its table is
+    checked against the stack; anything outside is corrected once, and what survives the
+    correction is flagged in the document and reported, never dropped silently.
+    Returns (sections markdown, facts about the call)."""
+    from shared.services import tech_stack_store  # noqa: PLC0415
+    from shared.services.tech_stack import (  # noqa: PLC0415
+        annotate_stack_section, check_stack_table, correction_note, render_for_prompt,
+    )
+
+    eff = await tech_stack_store.current_project_tech_stack()
+    block = render_for_prompt(eff)
+
+    def _prompt(section_ids: List[str], extra: str, current: str) -> str:
+        return (_components.build_generation_prompt(section_ids, custom_prompt=extra, tech_stack=block)
+                + f"\n--- {source_label.upper()} (the source of requirements) ---\n{source_text}\n"
+                + _components.existing_sections_note(current, section_ids))
+
+    prompt = _prompt(ids, custom_prompt, existing)
+    result = await _llm_generate_async(prompt, _GENERATION_SYSTEM)
+    calls = 1
+    violations: list = []
+    if block and "stack" in ids:
+        violations = check_stack_table(eff, result)
+        if violations:
+            broadcast_log(manager, "The technology stack table named technologies outside the project's "
+                                   "tech stack — correcting it once...", level="INFO")
+            extra = (custom_prompt + "\n\n" if custom_prompt else "") + correction_note(violations)
+            so_far = _components.merge_sections(existing, result) if existing.strip() else result
+            fixed = await _llm_generate_async(_prompt(["stack"], extra, so_far), _GENERATION_SYSTEM)
+            calls += 1
+            result = _components.merge_sections(result, fixed)
+            violations = check_stack_table(eff, result)
+        result = annotate_stack_section(result, eff, violations)
+    meta = {
+        "prompt_chars": len(prompt) + len(_GENERATION_SYSTEM),
+        "model_calls": calls,
+        "tech_stack": eff.stack.name if eff and eff.stack else None,
+        "tech_stack_source": eff.source if eff else "none",
+        "tech_stack_warning": eff.warning if eff else None,
+        "outside_stack": [f"{v.technology} ({v.layer})" if v.layer else v.technology for v in violations],
+    }
+    return result, meta
+
+
 async def _generate_components(
     source_label: str, source_text: str, components: List[str], custom_prompt: str,
 ) -> str:
@@ -587,12 +654,7 @@ async def _generate_components(
         "document content": "Uploaded document",
         "conversation context": "Conversation and project context",
     }.get(source_label, source_label)
-    prompt = (
-        _components.build_generation_prompt(ids, custom_prompt=custom_prompt)
-        + f"\n--- {source_label.upper()} (the source of requirements) ---\n{source_text}\n"
-        + _components.existing_sections_note(existing, ids)
-    )
-    result = await _llm_generate_async(prompt, _GENERATION_SYSTEM)
+    result, meta = await generate_section_text(source_label, source_text, ids, custom_prompt, existing)
 
     # The session's ONE document: what was there, plus what was just produced, in
     # catalogue order, a regenerated section replacing its earlier self.
@@ -603,7 +665,7 @@ async def _generate_components(
         shared.mermaid = mermaid_match.group(1).strip()
     receipt = await _autosave_architecture(document)
     broadcast_log(manager, f"{labels} generated.", level="INFO")
-    return _with_save_receipt(receipt, document)
+    return _tech_stack_receipt(meta) + _with_save_receipt(receipt, document)
 
 
 @tool
@@ -664,6 +726,14 @@ async def update_response(query: str, content: str, file_paths: Optional[List[st
         texts = [_extract_text_from_path(p) for p in file_paths if p]
         extra_context = "\n\n--- ADDITIONAL FILE CONTEXT ---\n" + "\n\n".join(texts)
 
+    # An edit is held to the project's tech stack like a generation — "switch to Kafka" on a
+    # stack without it answers with the not-covered marker, not a quiet change of stack.
+    from shared.services import tech_stack_store  # noqa: PLC0415
+    from shared.services.tech_stack import render_for_prompt  # noqa: PLC0415
+
+    stack_block = render_for_prompt(await tech_stack_store.current_project_tech_stack())
+    stack_rule = f"\n\n{stack_block}\n" if stack_block else ""
+
     prompt = f"""Update the content below based on the query. Preserve formatting and style.
 Keep every `##` section the content already has, with its exact header, unless the
 query asks to remove one; do not add sections the query does not ask for.
@@ -671,7 +741,7 @@ query asks to remove one; do not add sections the query does not ask for.
 QUERY: {query}
 
 CONTENT TO UPDATE:
-{content}{extra_context}
+{content}{extra_context}{stack_rule}
 
 Return only the updated content."""
     result = await _llm_generate_async(prompt)
@@ -1640,6 +1710,19 @@ def _build_orchestrator(model: str, litellm_provider: str, api_key: str,
     return instance
 
 
+def _with_tech_stack_note(messages: list, block: str) -> list:
+    """The project's tech stack joined to the system message sent THIS turn, never stored.
+
+    The chat's SystemMessage is built once, on a session's first turn; a stack chosen or
+    changed afterwards would never reach it. Joining (not adding a second system message) keeps
+    providers that accept only one system message happy."""
+    if not block:
+        return messages
+    if messages and isinstance(messages[0], SystemMessage) and isinstance(messages[0].content, str):
+        return [SystemMessage(content=f"{messages[0].content}\n\n{block}")] + list(messages[1:])
+    return [SystemMessage(content=block)] + list(messages)
+
+
 def _sanitize_messages(messages: list) -> list:
     """Keep tool_use / tool_result blocks paired in BOTH directions.
 
@@ -1676,7 +1759,13 @@ async def agent(state: AgentState):
         return {"messages": [AIMessage(content=friendly_model_error(e))]}
     set_resolved_model(resolved)
     try:
-        clean_messages = _sanitize_messages(state["messages"])
+        from shared.services import tech_stack_store  # noqa: PLC0415
+        from shared.services.tech_stack import render_for_prompt  # noqa: PLC0415
+
+        clean_messages = _with_tech_stack_note(
+            _sanitize_messages(state["messages"]),
+            render_for_prompt(await tech_stack_store.current_project_tech_stack()),
+        )
         orch = _build_orchestrator(resolved.model, resolved.litellm_provider,
                                    resolved.api_key, resolved.base_url, resolved.alias)
         # Bind base tools + any per-run MCP tools here (not in the cached builder) so
