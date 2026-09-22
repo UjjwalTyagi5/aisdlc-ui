@@ -88,7 +88,12 @@ class _FakeSession:
         self.calls.append("rollback")
 
 
-def _artifact(*, blob_path: str | None, blob_url: str | None = "https://x/y"):
+def _artifact(
+    *,
+    blob_path: str | None,
+    blob_url: str | None = "https://x/y",
+    approval_status: str | None = "approved",
+):
     return SimpleNamespace(
         id=uuid.uuid4(),
         run_id=uuid.uuid4(),
@@ -103,6 +108,11 @@ def _artifact(*, blob_path: str | None, blob_url: str | None = "https://x/y"):
         blob_path=blob_path,
         content_type="application/pdf",
         size_bytes=1234,
+        # The status the row held, recorded in the audit payload as `before` — the
+        # difference between "an approved document was destroyed" and "a draft was
+        # tidied up". A fake without it raises AttributeError inside the route, before
+        # any assertion in this file is reached.
+        approval_status=approval_status,
     )
 
 
@@ -176,6 +186,35 @@ async def test_the_audit_event_records_who_and_what(patched):
     assert event.payload["project_id"] == str(PROJECT)
     assert event.payload["blob_path"] == art.blob_path
     assert event.payload["had_stored_bytes"] is True
+
+
+@pytest.mark.unit
+async def test_the_status_the_row_held_is_recorded(patched):
+    """`before` is the only surviving trace of WHAT was deleted. Destroying an approved
+    document and clearing a draft produce the same event_type, and this field is what
+    tells them apart afterwards."""
+    art = _artifact(blob_path=_blob_path(), approval_status="approved")
+    patched(art)
+    db = _FakeSession()
+
+    await mod.delete_artifact(str(art.id), _request(_FakeBlob()), db)
+
+    event = next(o for o in db.added if isinstance(o, AuditEvent))
+    assert event.payload["before"] == "approved"
+
+
+@pytest.mark.unit
+async def test_a_row_that_never_had_a_status_is_recorded_as_a_draft(patched):
+    """`approval_status` is NULL on rows filed before the approval flow existed, and
+    None in the payload would read as "the field was not captured"."""
+    art = _artifact(blob_path=_blob_path(), approval_status=None)
+    patched(art)
+    db = _FakeSession()
+
+    await mod.delete_artifact(str(art.id), _request(_FakeBlob()), db)
+
+    event = next(o for o in db.added if isinstance(o, AuditEvent))
+    assert event.payload["before"] == "draft"
 
 
 # -- the motivating case: a row whose bytes never arrived ----------------------
@@ -329,42 +368,48 @@ def test_delete_is_not_implied_by_export():
 # -- the blob client's own contract -------------------------------------------
 
 
+def _client_over(blob):
+    """A BlobStorageClient whose container hands out `blob`, built without Azure.
+
+    `__new__` skips `__init__`, so every attribute `_service()` reads has to be set
+    here — including `_home_loop`, the loop-affinity marker. Setting it to None is the
+    documented "not claimed yet" state: the first awaited call claims the running loop
+    and yields `_client` directly, which is the path these two tests exercise. Left
+    unset, the tests died with AttributeError inside the loop guard and said nothing
+    about deleting.
+    """
+    from shared.storage.azure_blob import BlobStorageClient
+
+    client = BlobStorageClient.__new__(BlobStorageClient)
+    client._container = "c"
+    client._home_loop = None
+    client._client = SimpleNamespace(
+        get_container_client=lambda _c: SimpleNamespace(get_blob_client=lambda _n: blob)
+    )
+    return client
+
+
 @pytest.mark.unit
 async def test_delete_blob_treats_a_missing_blob_as_done_not_as_an_error():
     from azure.core.exceptions import ResourceNotFoundError
-
-    from shared.storage.azure_blob import BlobStorageClient
 
     class _Blob:
         async def delete_blob(self):
             raise ResourceNotFoundError("nope")
 
-    client = BlobStorageClient.__new__(BlobStorageClient)
-    client._container = "c"
-    client._client = SimpleNamespace(
-        get_container_client=lambda _c: SimpleNamespace(get_blob_client=lambda _n: _Blob())
-    )
-
-    assert await client.delete_blob("t/r/document/x.pdf") is False
+    assert await _client_over(_Blob()).delete_blob("t/r/document/x.pdf") is False
 
 
 @pytest.mark.unit
 async def test_delete_blob_reraises_anything_that_is_not_a_missing_blob():
     """A permission or network failure must reach the caller so it can keep the row."""
-    from shared.storage.azure_blob import BlobStorageClient
 
     class _Blob:
         async def delete_blob(self):
             raise RuntimeError("AuthorizationPermissionMismatch")
 
-    client = BlobStorageClient.__new__(BlobStorageClient)
-    client._container = "c"
-    client._client = SimpleNamespace(
-        get_container_client=lambda _c: SimpleNamespace(get_blob_client=lambda _n: _Blob())
-    )
-
     with pytest.raises(RuntimeError):
-        await client.delete_blob("t/r/document/x.pdf")
+        await _client_over(_Blob()).delete_blob("t/r/document/x.pdf")
 
 
 # ── a synthesised id is not a stored artifact ────────────────────────────────

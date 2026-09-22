@@ -16,6 +16,7 @@ Design note on not using httpx + live DB in the same test:
 """
 from __future__ import annotations
 
+import contextlib
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -127,13 +128,54 @@ def _mint(tenant_id: str, permissions: list[str] | None = None):
 # Unit tests — mock DB, exercise full HTTP path via httpx ASGI transport
 # ═══════════════════════════════════════════════════════════════════════════
 
+@contextlib.contextmanager
+def _app_serving(runs: list):
+    """The app with its DB session mocked AND the router's access gates stood down.
+
+    Every route under `/dev/{project_id}/...` sits behind `require_project_access()`
+    and `require_agent_access("development")` (added after these tests were written),
+    and both READ THE CALLER'S ROLES FROM THE DATABASE. These tests mock the session
+    away to exercise the endpoint's own contract, so the gates had nothing to read and
+    could only answer no: all three failed on 403 == 200, saying nothing about PRs.
+
+    Overridden by identity — the very `Depends` objects the router was built with — so
+    the gates stay in the app everywhere else. The refusals themselves are covered
+    against real roles in tests/test_dev_workspace_agent_access.py.
+    """
+    from process_api import app
+    from shared.db import get_db_session
+    from shared.routers.dev_workspace import dev_workspace_router
+
+    async def _allow():
+        return None
+
+    gates = [d.dependency for d in dev_workspace_router.dependencies]
+    app.dependency_overrides[get_db_session] = _make_db_override(runs)
+    for gate in gates:
+        app.dependency_overrides[gate] = _allow
+    try:
+        yield app
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        for gate in gates:
+            app.dependency_overrides.pop(gate, None)
+
+
+async def _get_prs(app, tenant_id: str = TENANT_A):
+    import httpx
+
+    token = _mint(tenant_id)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.get(
+            f"/dev/{PROJECT_A}/prs", headers={"Authorization": f"Bearer {token}"}
+        )
+
+
 @pytest.mark.unit
 async def test_list_prs_returns_only_runs_with_pr_url():
     """Runs without pr_url are excluded; runs with pr_url are included."""
-    import httpx
-    from process_api import app
-    from shared.db import get_db_session
-
     run_id_with_pr = "00000000-0000-0000-0000-b4ff00010001"
     run_with_pr = _make_run(
         run_id_with_pr,
@@ -157,32 +199,21 @@ async def test_list_prs_returns_only_runs_with_pr_url():
     # The WHERE clause in the real endpoint filters at the DB level; the mock
     # returns both — the endpoint's Python guard `if run.development_artifacts.get("pr_url")`
     # then excludes the no-pr run, proving the secondary guard works.
-    app.dependency_overrides[get_db_session] = _make_db_override([run_with_pr, run_no_pr])
-    try:
-        token = _mint(TENANT_A)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.get(f"/dev/{PROJECT_A}/prs", headers={"Authorization": f"Bearer {token}"})
+    with _app_serving([run_with_pr, run_no_pr]) as app:
+        response = await _get_prs(app)
 
-        assert response.status_code == 200
-        data = response.json()
-        ids = [item["id"] for item in data]
-        assert run_id_with_pr in ids, "Run with pr_url must be returned"
-        assert "00000000-0000-0000-0000-b4ff00010002" not in ids, (
-            "Run without pr_url must be excluded"
-        )
-    finally:
-        app.dependency_overrides.pop(get_db_session, None)
+    assert response.status_code == 200
+    data = response.json()
+    ids = [item["id"] for item in data]
+    assert run_id_with_pr in ids, "Run with pr_url must be returned"
+    assert "00000000-0000-0000-0000-b4ff00010002" not in ids, (
+        "Run without pr_url must be excluded"
+    )
 
 
 @pytest.mark.unit
 async def test_list_prs_maps_fields_correctly():
     """Returned PR item maps title, branch, status='open', url, created_at correctly."""
-    import httpx
-    from process_api import app
-    from shared.db import get_db_session
-
     run_id = "00000000-0000-0000-0000-b4ff00010001"
     run = _make_run(
         run_id,
@@ -196,36 +227,25 @@ async def test_list_prs_maps_fields_correctly():
         },
     )
 
-    app.dependency_overrides[get_db_session] = _make_db_override([run])
-    try:
-        token = _mint(TENANT_A)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.get(f"/dev/{PROJECT_A}/prs", headers={"Authorization": f"Bearer {token}"})
+    with _app_serving([run]) as app:
+        response = await _get_prs(app)
 
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        pr = data[0]
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    pr = data[0]
 
-        assert pr["id"] == run_id
-        assert pr["title"] == "Add health endpoint"
-        assert pr["branch"] == "dev/health"
-        assert pr["status"] == "open", "v1 bucket must always be 'open'"
-        assert "pullrequest/12" in pr["url"]
-        assert "created_at" in pr
-    finally:
-        app.dependency_overrides.pop(get_db_session, None)
+    assert pr["id"] == run_id
+    assert pr["title"] == "Add health endpoint"
+    assert pr["branch"] == "dev/health"
+    assert pr["status"] == "open", "v1 bucket must always be 'open'"
+    assert "pullrequest/12" in pr["url"]
+    assert "created_at" in pr
 
 
 @pytest.mark.unit
 async def test_list_prs_title_falls_back_to_branch_name():
     """When pr_title is absent, title falls back to branch_name."""
-    import httpx
-    from process_api import app
-    from shared.db import get_db_session
-
     run = _make_run(
         "00000000-0000-0000-0000-b4ff00010001",
         PROJECT_A,
@@ -237,21 +257,14 @@ async def test_list_prs_title_falls_back_to_branch_name():
         },
     )
 
-    app.dependency_overrides[get_db_session] = _make_db_override([run])
-    try:
-        token = _mint(TENANT_A)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            response = await client.get(f"/dev/{PROJECT_A}/prs", headers={"Authorization": f"Bearer {token}"})
+    with _app_serving([run]) as app:
+        response = await _get_prs(app)
 
-        assert response.status_code == 200
-        pr = response.json()[0]
-        assert pr["title"] == "dev/feature-x", (
-            "title must fall back to branch_name when pr_title is absent"
-        )
-    finally:
-        app.dependency_overrides.pop(get_db_session, None)
+    assert response.status_code == 200
+    pr = response.json()[0]
+    assert pr["title"] == "dev/feature-x", (
+        "title must fall back to branch_name when pr_title is absent"
+    )
 
 
 @pytest.mark.unit

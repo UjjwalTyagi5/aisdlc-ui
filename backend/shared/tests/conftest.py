@@ -13,9 +13,9 @@ from config.env import (
     REDIS_URL,
 )
 
-# Names that mark a database as safe to DESTROY. Anything else is presumed to be
-# somebody's real data.
-_DISPOSABLE_HINTS = ("test", "tmp", "temp", "scratch", "ci", "throwaway")
+#: Opt out of the throwaway database and destroy the environment's own, for
+#: reproducing a migration failure against a specific database. Deliberately awkward
+#: to type by accident and greppable when somebody wonders how it got set.
 _OPT_IN = "ALLOW_DESTRUCTIVE_DB_TESTS"
 
 
@@ -25,9 +25,15 @@ def _database_name(dsn: str) -> str:
     return m.group(1) if m else ""
 
 
+def _maintenance_dsn(dsn: str) -> str:
+    """The same server, as libpq, pointed at `postgres` — where CREATE DATABASE runs."""
+    without_driver = re.sub(r"^postgresql\+\w+://", "postgresql://", dsn)
+    return re.sub(r"/([^/?]+)(\?|$)", r"/postgres\2", without_driver)
+
+
 @pytest.fixture
 def disposable_migrations_dsn():
-    """A migrations DSN this test is allowed to DROP EVERY TABLE in.
+    """A database of this test's own, created here and dropped afterwards.
 
     WHY THIS EXISTS. `test_alembic_migration_cycle` runs `alembic downgrade base`,
     which drops the entire schema. It took the DSN straight from the environment and
@@ -37,27 +43,54 @@ def disposable_migrations_dsn():
     one project, the Langfuse bindings and 125 audit events, gone in a run that
     reported itself as a single ordinary test failure.
 
-    A test that can do that must name the database it is willing to ruin. The DSN is
-    accepted only when the database name looks disposable, or when the caller opts in
-    explicitly with ALLOW_DESTRUCTIVE_DB_TESTS=1 -- which is deliberately awkward to
-    type by accident and greppable when someone wonders how it got set.
+    A NAME WAS NOT ENOUGH. The first fix accepted any database whose name looked
+    disposable, which in a full suite run means `sdlc_product_test` -- the database
+    every other test is using at that moment. The cycle then dropped all 60-odd tables
+    under ~5000 running tests: foreign-key violations in their cleanup fixtures, reads
+    that returned nothing, and this test failing on its own `downgrade base` against
+    the locks they held. A test that drops every table cannot share a database with
+    anything, however well named.
+
+    So it gets one. Created on the same server with the same credentials, migrated,
+    destroyed, and never touched by another test. `ALLOW_DESTRUCTIVE_DB_TESTS=1` still
+    means what it said -- use the environment's own database -- for the rare case of
+    reproducing a migration failure against a specific one.
     """
     dsn = POSTGRES_MIGRATIONS_CONN_STRING
     if not dsn:
         pytest.skip("POSTGRES_MIGRATIONS_CONN_STRING not set")
 
-    name = _database_name(dsn)
     if os.environ.get(_OPT_IN) == "1":
         return dsn
-    if not any(hint in name.lower() for hint in _DISPOSABLE_HINTS):
+
+    import uuid as _uuid
+
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover — psycopg ships with the app
+        pytest.skip("psycopg is needed to create the throwaway migration database")
+
+    name = f"sdlc_migration_cycle_{_uuid.uuid4().hex[:12]}"
+    admin = _maintenance_dsn(dsn)
+    try:
+        with psycopg.connect(admin, autocommit=True, connect_timeout=10) as conn:
+            conn.execute(f'CREATE DATABASE "{name}"')
+    except Exception as exc:  # noqa: BLE001 — no CREATEDB right is a skip, not a failure
         pytest.skip(
-            f"refusing to run a schema-destroying test against database {name!r}: "
-            f"the name does not look disposable. This test runs `alembic downgrade "
-            f"base`, which DROPS EVERY TABLE. Point "
-            f"POSTGRES_MIGRATIONS_CONN_STRING at a throwaway database, or set "
-            f"{_OPT_IN}=1 if you genuinely mean to destroy {name!r}."
+            f"cannot create a throwaway database for the migration cycle "
+            f"({type(exc).__name__}: {exc}). The role needs CREATEDB, or set "
+            f"{_OPT_IN}=1 to run the cycle against "
+            f"{_database_name(dsn)!r} itself -- which DROPS EVERY TABLE in it."
         )
-    return dsn
+
+    try:
+        yield re.sub(r"/([^/?]+)(\?|$)", rf"/{name}\2", dsn)
+    finally:
+        try:
+            with psycopg.connect(admin, autocommit=True, connect_timeout=10) as conn:
+                conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        except Exception:  # noqa: BLE001 — a leftover scratch database is not a failure
+            pass
 
 
 @pytest.fixture

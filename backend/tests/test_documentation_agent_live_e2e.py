@@ -165,7 +165,25 @@ async def test_the_real_tool_loop_reads_git_history_and_upstream_artifacts_and_s
     ]
     model = _ScriptedModel(script)
 
-    with patch.object(compiler, "_resolve_model", return_value=model):
+    # THE NODE RESOLVES A MODEL BEFORE IT BUILDS ONE, and this test predates that.
+    # `agent_node` gained a real `resolve_model_for_run` call — the fix for agents
+    # silently falling back to a dead ANTHROPIC_API_KEY while a valid key sat configured
+    # — and it runs BEFORE `_resolve_model`, so patching only the latter left the turn
+    # raising NoModelConfiguredError against a tenant with no providers. The tool loop
+    # this test exists to prove never started. Same patch as
+    # tests/test_code_review_agent_live_e2e.py, for the same reason: giving this tenant a
+    # provider row would make the test depend on model configuration it is not about.
+    from shared.services import model_resolver
+
+    async def _resolved(*_a, **_k):
+        return model_resolver.ResolvedModel(
+            provider="anthropic", litellm_provider="anthropic",
+            model="claude-sonnet-4-6", api_key="not-used-the-model-is-scripted",
+            base_url=None, alias="scripted",
+        )
+
+    with patch.object(compiler, "_resolve_model", return_value=model), \
+            patch.object(model_resolver, "resolve_model_for_run", _resolved):
         result = await compiler.app.ainvoke(
             {
                 "messages": [HumanMessage(content="Generate the changelog and save it.")],

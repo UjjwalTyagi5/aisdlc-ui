@@ -30,7 +30,7 @@ OTHER = "user-who-reviews-it"
 
 
 class _Run:
-    def __init__(self, created_by):
+    def __init__(self, created_by, *, gate_pending: bool = True):
         self.id = RUN
         self.created_by = created_by
         self.current_stage = "requirements"
@@ -38,6 +38,10 @@ class _Run:
         self.status = "running"
         self.tenant_id = TENANT
         self.project_id = None
+        # A run awaiting a decision. `record_approval` reads this to describe the gate's
+        # prior state and then closes it, so a fake without the field raises before any
+        # rule in this file is reached.
+        self.gate_pending = gate_pending
 
 
 class _Request:
@@ -85,7 +89,6 @@ async def test_somebody_else_still_can(monkeypatch):
     """The other half. A rule that refuses everyone is not this rule."""
     from shared.routers import runs
 
-    _install(monkeypatch, _Run(created_by=INITIATOR))
     committed = {}
 
     class _DB:
@@ -101,11 +104,17 @@ async def test_somebody_else_still_can(monkeypatch):
         async def refresh(self, obj):
             pass
 
+    run = _Run(created_by=INITIATOR)
+    _install(monkeypatch, run)
+
     result = await runs.record_approval(RUN, _Body(), _Request(OTHER), db=_DB())
     assert result is not None
     # The audit row is ADDED and flushed; the session dependency commits. Asserting on
     # commit here would be asserting about the framework, not about this endpoint.
     assert committed.get("added") is not None, "the approval must be recorded"
+    # And the gate closes with the decision — a run left `gate_pending` stays in every
+    # eligible approver's queue for ever, which is how this was broken once.
+    assert run.gate_pending is False
 
 
 @pytest.mark.asyncio

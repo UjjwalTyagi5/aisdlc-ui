@@ -40,6 +40,27 @@ _PAGE_DETAIL_FIXTURE = _PAGE_LIST_FIXTURE["results"][0]
 # the respx mock.
 
 
+@pytest.fixture(autouse=True)
+def _connected(monkeypatch):
+    """A user whose Confluence credential is saved, which every request now demands.
+
+    Confluence is a PERSONAL credential: `_request` resolves the acting user's token
+    through `auth_adapter` and raises `ConfluenceNotConnected` BEFORE any HTTP call when
+    there is none. That guard arrived after these tests were written, so twelve of them
+    stopped reaching the respx mock at all and failed on "not connected" — saying
+    nothing about the REST paths they exist to pin. Resolution is stubbed; the URLs
+    below are still asserted by respx, which is what this file is for.
+    """
+    async def _auth(self, tenant_id: str = "") -> dict:
+        return {
+            "confluence_url": CONFLUENCE_BASE,
+            "email": "tester@example.com",
+            "token": "test-token",
+        }
+
+    monkeypatch.setattr(ConfluenceConnector, "auth_adapter", _auth)
+
+
 def _make_connector() -> ConfluenceConnector:
     return ConfluenceConnector(CONFLUENCE_BASE)
 

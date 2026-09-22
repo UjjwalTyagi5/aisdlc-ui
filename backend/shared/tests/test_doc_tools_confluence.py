@@ -33,18 +33,33 @@ class _FakeConnector:
         self.write_adapter = AsyncMock()
 
 
-def _patch_confluence(monkeypatch, connector, default_space=""):
+def _patch_confluence(monkeypatch, connector, default_space="", approved=("a.md",)):
+    """The connector, the default space, and WHICH DOCUMENTS ARE APPROVED.
+
+    Publishing is now approved-only and FAILS CLOSED: `publish_to_confluence` reads the
+    project's approved artifacts and, when that lookup raises, publishes nothing rather
+    than putting unreviewed drafts on the company wiki. Against no database the lookup
+    always raises, so these tests only ever saw the refusal. Stubbing it here keeps the
+    gate honest — `approved` names the filenames a test wants signed off, and a test
+    that passes `approved=()` gets the refusal.
+    """
     async def _fake_target(tenant_id):
         return {"space": default_space} if default_space else None
 
     async def _fake_get_connector(**kwargs):
         return connector
 
+    async def _fake_approved(tenant_id, project_id, stage):
+        return [{"name": name} for name in approved]
+
     monkeypatch.setattr(
         "shared.services.notification_targets.confluence_target", _fake_target
     )
     monkeypatch.setattr(
         "config.connector_factory.get_connector_for_session", _fake_get_connector
+    )
+    monkeypatch.setattr(
+        "shared.tools.sharepoint_artifacts._approved_documents", _fake_approved
     )
 
 

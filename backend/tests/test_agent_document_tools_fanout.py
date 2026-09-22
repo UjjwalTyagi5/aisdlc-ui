@@ -55,10 +55,32 @@ def test_the_agent_can_read_approved_documents(module_path, attr, stage):
 
 @pytest.mark.parametrize("module_path,attr,stage", AGENTS, ids=[a[2] for a in AGENTS])
 def test_the_agent_can_file_approved_documents_to_sharepoint(module_path, attr, stage):
+    """In the agent's own list, OR resolved per run from what the project granted.
+
+    TWO WIRINGS ARE LIVE. Most agents bind `make_sharepoint_tools` at import. The
+    Project Manager no longer does: connector tools there come from
+    `shared/tools/stage_tools.tools_for_stage`, derived from the project's grant on
+    every invocation, precisely because a hand-written list could disagree with the
+    "Tools per stage" picker — and did, telling a user it could only publish to
+    SharePoint while Confluence sat granted. Demanding the static list here would
+    make this test fail the agent that fixed that.
+
+    What must never happen is NEITHER: an agent with no SharePoint tools and no per-run
+    resolution answers "I cannot publish" to a project that granted it the library.
+    """
+    import importlib
+
     names = _tool_names(module_path, attr)
-    assert "publish_approved_to_sharepoint" in names, f"{stage} cannot publish"
-    assert "list_sharepoint_documents" in names
-    assert "read_sharepoint_document" in names
+    if "publish_approved_to_sharepoint" in names:
+        assert "list_sharepoint_documents" in names
+        assert "read_sharepoint_document" in names
+        return
+
+    mod = importlib.import_module(module_path)
+    assert getattr(mod, "tools_for_stage", None) is not None, (
+        f"{stage} can neither publish to SharePoint from its own tool list nor resolve "
+        "connector tools per run — it is the agent that got missed"
+    )
 
 
 @pytest.mark.parametrize("module_path,attr,stage", AGENTS, ids=[a[2] for a in AGENTS])

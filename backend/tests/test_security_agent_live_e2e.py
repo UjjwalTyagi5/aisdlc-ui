@@ -31,6 +31,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 pytestmark = pytest.mark.asyncio
 
+#: The acting tenant. A UUID because it reaches a uuid column, not because any row for
+#: it exists — model resolution is patched out below.
+_TENANT = "00000000-0000-0000-0000-0000000000e3"
+
 _VULNERABLE_SOURCE = '''\
 import subprocess
 
@@ -88,7 +92,9 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
     set_session_id(session_id)
     s = get_session(session_id)
     s.work_dir = scan_target_dir
-    s.tenant_id = "test-tenant"
+    # A UUID: the graph asks the database for this tenant's model offerings on the way
+    # past, and `tenant_id` is a uuid column — 'test-tenant' failed that query outright.
+    s.tenant_id = _TENANT
 
     script = [
         # Turn 1: scan_dependencies alone, split out from the other three tool calls
@@ -153,11 +159,27 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
     ]
     model = _ScriptedModel(script)
 
-    with patch.object(scanner, "_resolve_model", return_value=model):
+    # THE NODE RESOLVES A MODEL BEFORE IT BUILDS ONE, and this test predates that.
+    # `agent_node` gained a real `resolve_model_for_run` call — the fix for agents
+    # silently falling back to a dead ANTHROPIC_API_KEY — and it runs BEFORE
+    # `_resolve_model`. Patching only the latter left the node logging "Security model
+    # resolution error" and answering with an apology: the scripted model was never
+    # called once (`model.calls == 0`) and the four-scanner loop this test exists to
+    # prove never started. Same patch as tests/test_code_review_agent_live_e2e.py.
+    from shared.services import model_resolver
+
+    async def _resolved(*_a, **_k):
+        return model_resolver.ResolvedModel(
+            provider="anthropic", litellm_provider="anthropic",
+            model="claude-sonnet-4-6", api_key="not-used-the-model-is-scripted",
+            base_url=None, alias="scripted",
+        )
+
+    with patch.object(scanner, "_resolve_model", return_value=model),             patch.object(model_resolver, "resolve_model_for_run", _resolved):
         result = await scanner.app.ainvoke(
             {
                 "messages": [HumanMessage(content="Please scan the prepared target.")],
-                "tenant_id": "test-tenant",
+                "tenant_id": _TENANT,
                 "model_id": None,
                 "offering_id": None,
             },
@@ -179,14 +201,18 @@ async def test_the_real_tool_loop_runs_all_four_scanners_and_produces_a_persiste
     assert any(f["cve"] == "CVE-2018-1000656" for f in trivy_out["findings"])
 
     # Real Semgrep run found the real shell=True pattern.
+    # `rule`, not `rule_id`: these tools no longer read the scanner wrappers directly.
+    # They go through `shared/services/code_security_scan`, the one scan both this agent
+    # and Code Review share, which normalises every scanner's finding to the same keys
+    # (rule / severity / message / file / line).
     semgrep_out = _tool_result("scan_code")
     assert semgrep_out["status"] == "ok"
-    assert any("shell-true" in f["rule_id"] for f in semgrep_out["findings"])
+    assert any("shell-true" in f["rule"] for f in semgrep_out["findings"])
 
     # Real Gitleaks run found the real hardcoded GitHub token.
     gitleaks_out = _tool_result("scan_secrets")
     assert gitleaks_out["status"] == "ok"
-    assert any(f["rule_id"] == "github-pat" for f in gitleaks_out["findings"])
+    assert any(f["rule"] == "github-pat" for f in gitleaks_out["findings"])
 
     # Real SBOM builder parsed the real requirements.txt.
     sbom_out = _tool_result("generate_sbom")

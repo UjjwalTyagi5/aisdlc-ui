@@ -5,7 +5,7 @@ Usage (from agentic_app/ with venv active):
     python agents_orchestrator/deployment_agent/test_deployment_agent.py
 
 Requires the FastAPI server to be running:
-    uvicorn process_api:app --reload --port 8001
+    uvicorn process_api:app --reload --port 8004
 """
 
 import asyncio
@@ -16,7 +16,7 @@ import zipfile
 import io
 import httpx
 
-BASE_URL = "http://localhost:8001/sdlc/agent/deployment_orchestrator"
+BASE_URL = "http://localhost:8004/sdlc/agent/deployment_orchestrator"
 SESSION_ID = "test-session-001"
 USER_ID = "test-user"
 
@@ -240,11 +240,11 @@ async def main():
     # Quick connectivity check
     try:
         async with httpx.AsyncClient(timeout=3) as client:
-            await client.get("http://localhost:8001/health")
+            await client.get("http://localhost:8004/health")
     except Exception:
-        print("\nERROR: FastAPI server not reachable at http://localhost:8001")
+        print("\nERROR: FastAPI server not reachable at http://localhost:8004")
         print("Start it first:")
-        print("  cd agentic_app && uvicorn process_api:app --reload --port 8001")
+        print("  cd agentic_app && uvicorn process_api:app --reload --port 8004")
         sys.exit(1)
 
     await test_sessions_info()

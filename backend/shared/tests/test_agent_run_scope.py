@@ -17,7 +17,7 @@ from shared.services.agent_run import agent_run_scope, AgentRunScope
 async def test_scope_sets_and_clears_connector(monkeypatch):
     mock_connector = MagicMock()
 
-    async def _fake_kind(tenant_id, project_id, agent_id):
+    async def _fake_kind(tenant_id, project_id, agent_id, owner_id=None):
         return "azure_devops"
 
     async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
@@ -77,7 +77,7 @@ async def test_scope_empty_tenant_string_is_noop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scope_resolution_failure_is_failsoft(monkeypatch):
-    async def _fake_kind(tenant_id, project_id, agent_id):
+    async def _fake_kind(tenant_id, project_id, agent_id, owner_id=None):
         return "azure_devops"
 
     async def _raise(kind="azure_devops", tenant_id="", **kwargs):
@@ -100,7 +100,7 @@ async def test_scope_resolution_failure_is_failsoft(monkeypatch):
 async def test_scope_clears_connector_on_error(monkeypatch):
     mock_connector = MagicMock()
 
-    async def _fake_kind(tenant_id, project_id, agent_id):
+    async def _fake_kind(tenant_id, project_id, agent_id, owner_id=None):
         return "azure_devops"
 
     async def _fake_get(kind="azure_devops", tenant_id="", **kwargs):
@@ -136,7 +136,7 @@ def test_pick_board_kind_prefers_non_ado():
 @pytest.mark.asyncio
 async def test_scope_no_board_assigned_injects_nothing(monkeypatch):
     """A stage with no assigned board must NOT silently fall back to azure_devops."""
-    async def _no_board(tenant_id, project_id, agent_id):
+    async def _no_board(tenant_id, project_id, agent_id, owner_id=None):
         return None
 
     async def _boom(kind="azure_devops", tenant_id="", **kwargs):

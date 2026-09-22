@@ -275,17 +275,29 @@ def review_session(repo):
     s = get_session(sid)
     s.work_dir, s.mode, s.repo_name, s.source_branch, s.head_sha = str(repo), "repo", "QuickLink", "main", "abc1234"
     s.inventory = branch_inventory(str(repo))
-    s.files_read, s.security, s.last_artifact, s.documents_read = [], None, None, {}
+    s.files_read, s.last_artifact, s.documents_read = [], None, {}
     return s
 
 
 @pytest.mark.asyncio
-async def test_a_review_cannot_be_submitted_without_the_security_review(review_session):
-    from agents_orchestrator.code_review_agent.tools.review_tools import submit_code_review
+async def test_a_review_submits_without_a_security_scan(review_session):
+    """SCANNING IS THE SECURITY AGENT'S. The SBOM, the CVE counts and the sign-off moved
+    to `shared/services/code_security_scan` and that agent's report, so submit has no
+    security gate left: a review that read the branch is complete on its own. This used
+    to demand a `run_security_review` the reviewer no longer has, which would have
+    deadlocked every submission if the gate had survived the move."""
+    from agents_orchestrator.code_review_agent.tools.review_tools import (
+        read_repo_file, submit_code_review,
+    )
 
-    out = await submit_code_review.ainvoke({"review_json": json.dumps({"summary": "x", "merge_recommendation": "approve"})})
-    assert out.startswith("ERROR") and "run_security_review" in out
-    assert review_session.last_artifact is None
+    for path in ("src/app.js", "package.json"):
+        await read_repo_file.ainvoke({"path": path})
+
+    out = await submit_code_review.ainvoke({"review_json": json.dumps(
+        {"summary": "x", "merge_recommendation": "approve"})})
+
+    assert "Review submitted" in out
+    assert review_session.last_artifact is not None
 
 
 @pytest.mark.asyncio
@@ -360,7 +372,7 @@ async def test_a_document_list_that_cannot_be_read_is_said_not_treated_as_none(r
 
 
 @pytest.mark.asyncio
-async def test_the_submitted_review_carries_the_scan_and_what_was_read(review_session, monkeypatch):
+async def test_the_submitted_review_carries_what_was_read(review_session, monkeypatch):
     from agents_orchestrator.code_review_agent.tools import review_tools
     from agents_orchestrator.code_review_agent.tools.review_tools import read_repo_file, submit_code_review
 
@@ -368,16 +380,16 @@ async def test_the_submitted_review_carries_the_scan_and_what_was_read(review_se
     # what was not read.
     monkeypatch.setattr(review_tools, "_READ_ALL_MAX_FILES", 1)
     await read_repo_file.ainvoke({"path": "src/app.js"})
-    review_session.security = {"scanners": [], "totals": {"vulnerabilities": 0}, "sbom": {"components": []}}
     out = await submit_code_review.ainvoke({"review_json": json.dumps({
-        "summary": "Small app.", "merge_recommendation": "approve",
-        "security_summary": "Nothing found.", "findings": [],
+        "summary": "Small app.", "merge_recommendation": "approve", "findings": [],
     })})
 
     assert "Review submitted" in out
     art = review_session.last_artifact
     assert art["context"]["mode"] == "repo"
-    assert art["security"] == review_session.security and art["security_summary"] == "Nothing found."
+    # No security section: the scan and its sign-off are the Security agent's report,
+    # and a reviewer that carried a half-filled copy is how two reports disagreed.
+    assert "security" not in art and "security_summary" not in art
     assert art["scope"]["files_read"] == ["src/app.js"]
     assert art["scope"]["reviewable_files_read"] == 1 and art["scope"]["not_read"] == ["package.json"]
 
@@ -403,9 +415,13 @@ def test_the_agent_has_the_new_tools_and_is_told_to_use_them():
     from agents_orchestrator.code_review_agent.prompts.review_prompt import CODE_REVIEW_SYSTEM_PROMPT
 
     names = {t.name for t in reviewer._tools}
-    assert {"run_security_review", "list_repo_files", "raise_document_for_approval"} <= names
-    assert "WHOLE BRANCH" in CODE_REVIEW_SYSTEM_PROMPT and "run_security_review" in CODE_REVIEW_SYSTEM_PROMPT
-    assert "security_summary" in CODE_REVIEW_SYSTEM_PROMPT
+    assert {"run_semgrep_scan", "list_repo_files", "raise_document_for_approval"} <= names
+    # And NOT the scanner of record: `run_security_review` moved to the Security agent
+    # with the SBOM and the sign-off. Leaving it here is what produced two reports that
+    # each claimed the security verdict.
+    assert "run_security_review" not in names
+    assert "WHOLE BRANCH" in CODE_REVIEW_SYSTEM_PROMPT
+    assert "Security agent" in CODE_REVIEW_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

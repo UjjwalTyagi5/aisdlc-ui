@@ -79,10 +79,18 @@ async def project():
 
     yield {"org": org, "bu": bu, "proj": proj}
 
+    # SCOPED BY tenant_id, AND runs BEFORE projects. Unqualified, these three statements
+    # leaned on the row-level policy to mean "this tenant's rows" — true for the
+    # application's role, not for the superuser a local .env.test usually supplies. On
+    # that connection `DELETE FROM projects` reached for EVERY project in the database,
+    # hit `runs_project_id_fkey` against another test's run, and failed six teardowns in
+    # a full-suite run while passing alone. Naming the tenant makes the cleanup say what
+    # it means either way, and deleting runs first respects the foreign key.
     async with get_db_session_for_tenant(org) as s:
-        await s.execute(text("DELETE FROM role_bindings"))
-        await s.execute(text("DELETE FROM artifacts"))
-        await s.execute(text("DELETE FROM projects"))
+        for table in ("role_bindings", "artifacts", "runs", "projects"):
+            await s.execute(
+                text(f"DELETE FROM {table} WHERE tenant_id = CAST(:t AS uuid)"), {"t": org}
+            )
     async with get_db_session_superuser() as s:
         await s.execute(text(
             "DELETE FROM workspaces WHERE organization_id = CAST(:t AS uuid)"), {"t": org})
