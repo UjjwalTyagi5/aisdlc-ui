@@ -158,7 +158,7 @@ def render_requirements_docx(markdown: str, path: str, *, meta: RequirementsDocM
             ("Project", meta.project),
             ("Source", ", ".join(meta.sources)),
             ("Sections", str(len(sections)) if sections else ""),
-            ("Generated", meta.generated_on),
+            ("Date", meta.generated_on),
         ],
         footer=f"{meta.title} · {meta.kind.label}",
         render_mermaid=render_mermaid, fetch_image=fetch_image,

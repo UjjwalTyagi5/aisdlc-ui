@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Boxes, CalendarDays, FileText, Layers } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { MermaidRenderer } from "@/components/app/mermaid-renderer";
 import {
   Callout,
   type Fact,
@@ -185,7 +186,25 @@ const components: Components = {
       <code className="bg-muted rounded px-1 py-0.5 font-mono text-[12px]">{children}</code>
     );
   },
-  pre: ({ children }) => <pre className="my-3">{children}</pre>,
+  // A ```mermaid block IS A DIAGRAM. The Word file draws it as a figure
+  // (`markdown_docx.mermaid`), the chat draws it with the same renderer as here, and this
+  // viewer showed its source — so a design opened on the page had code where its C4,
+  // sequence and ER diagrams belonged. A diagram that will not parse keeps its source.
+  pre: ({ children }) => {
+    const codeEl = React.Children.toArray(children).find(
+      (c): c is React.ReactElement<{ className?: string; children?: React.ReactNode }> => React.isValidElement(c),
+    );
+    if (codeEl && /language-mermaid\b/.test(codeEl.props.className ?? "")) {
+      return <MermaidRenderer source={text(codeEl.props.children).replace(/\n$/, "")} className="my-4" height={460} />;
+    }
+    return <pre className="my-3">{children}</pre>;
+  },
+  // A figure carried inside the document itself — a Word file's pictures, read back as
+  // data URLs by `docx_preview` when the document has no page copy.
+  img: ({ src, alt }) => (
+    // eslint-disable-next-line @next/next/no-img-element -- an embedded data: URL; next/image adds nothing here
+    <img src={typeof src === "string" ? src : undefined} alt={alt || "Figure"} className="my-4 max-w-full rounded-lg border bg-white" />
+  ),
   table: ({ children }) => (
     <div className="my-3 overflow-x-auto rounded-xl border">
       <table className="w-full border-collapse text-[13px]">{children}</table>
@@ -206,10 +225,15 @@ const components: Components = {
   },
 };
 
+/** A picture inside the document. Only raster images as base64 — react-markdown's default
+ *  drops every `data:` URL, which is right for links and wrong for a document's figures. */
+const FIGURE_DATA_URL = /^data:image\/(png|jpeg|gif|webp);base64,[a-z0-9+/=]+$/i;
+const urlTransform = (url: string) => (FIGURE_DATA_URL.test(url) ? url : defaultUrlTransform(url));
+
 export function MarkdownBody({ markdown, className }: { markdown: string; className?: string }) {
   return (
     <div className={cn("min-w-0", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{markdown}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={urlTransform}>{markdown}</ReactMarkdown>
     </div>
   );
 }
@@ -224,6 +248,7 @@ export function MarkdownReport({
   status,
   actions,
   facts: extraFacts = [],
+  kind: kindOverride,
   className,
 }: {
   markdown: string;
@@ -237,10 +262,15 @@ export function MarkdownReport({
   /** For the band's corner: Download Word, Raise for approval. */
   actions?: React.ReactNode;
   facts?: Fact[];
+  /** What the document is, when the caller knows better than its headings — an agent page
+   *  names its own documents (a code review report is not a "Requirements document"). Left
+   *  out, the kind is read from the headings, as the Requirements pages always have. */
+  kind?: Pick<DocumentKind, "eyebrow" | "label">;
   className?: string;
 }) {
   const doc = React.useMemo(() => parseDocument(markdown, filename), [markdown, filename]);
-  const title = doc.title ?? (project ? `${project} — ${doc.kind.label}` : titleFromFilename(filename) || doc.kind.label);
+  const kind = kindOverride ?? doc.kind;
+  const title = doc.title ?? (project ? `${project} — ${kind.label}` : titleFromFilename(filename) || kind.label);
   const when = generatedAt
     ? (Number.isNaN(Date.parse(generatedAt)) ? generatedAt : new Date(generatedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }))
     : undefined;
@@ -256,7 +286,7 @@ export function MarkdownReport({
     <article className={cn("mx-auto max-w-5xl space-y-8 p-4 md:p-6", className)}>
       <header className="space-y-3">
         <ReportHero
-          eyebrow={doc.kind.eyebrow}
+          eyebrow={kind.eyebrow}
           eyebrowTail={project}
           title={title}
           subtitle={leadOf(doc)}

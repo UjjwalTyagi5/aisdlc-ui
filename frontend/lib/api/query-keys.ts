@@ -76,6 +76,8 @@ export const qk = {
     detail: (id: ArtifactId) => ["artifacts", "detail", id] as const,
     /** The document's page copy (GET /artifacts/{id}/page). */
     page: (id: string) => ["artifacts", "page", id] as const,
+    /** Any document as the page shows it (GET /artifacts/{id}/preview). */
+    preview: (id: string) => ["artifacts", "preview", id] as const,
   },
   // Frozen stage payload versions and their publication state. Deliberately a
   // separate namespace from `artifacts` above: that one is blob documents, this one

@@ -124,7 +124,7 @@ def write_word(markdown: str, path: str, *, title: str, eyebrow: str, agent_name
         markdown, path, title=title, eyebrow=eyebrow, subject=f"{agent_name} document",
         subtitle=", ".join(sections[:4]) + (" …" if len(sections) > 4 else "") if sections else "",
         meta_line=f"{today} · Draft · not yet raised for approval",
-        facts=list(facts or []) or [("Sections", str(len(sections)) if sections else ""), ("Generated", today)],
+        facts=list(facts or []) or [("Sections", str(len(sections)) if sections else ""), ("Date", today)],
         footer=f"{title} · {agent_name}",
     )
     # The page copy: what the app renders when the document is opened.

@@ -26,6 +26,7 @@ import {
 
 import { AgentChatDrawer } from "@/components/app/agent-chat-drawer";
 import { DocumentList } from "@/components/app/document-list";
+import { DocumentPreview } from "@/components/app/document-preview";
 import { StageVersionPanel } from "@/components/app/stage-version-panel";
 import { ModelSelector } from "@/components/app/model-selector";
 import { RepoPickerDialog } from "@/components/app/repo-picker-dialog";
@@ -34,6 +35,7 @@ import { CodeViewer } from "@/components/app/code-viewer";
 import { RequireRole } from "@/components/auth/require-role";
 
 import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useDocumentView } from "@/hooks/use-open-document";
 import { useChatDeepLink } from "@/hooks/use-chat-deep-link";
 import { useSession } from "@/hooks/use-session";
 import {
@@ -74,6 +76,8 @@ export default function DevelopmentPage() {
     queryKey: qk.projects.detail(projectId),
     queryFn: () => getProject(projectId),
   });
+  // A row in the Documents panel opens in the centre, as on every agent page.
+  const docView = useDocumentView(projectId);
 
   const myAccessQ = useQuery({
     queryKey: qk.myAgentAccess.forProject(projectId),
@@ -275,6 +279,8 @@ export default function DevelopmentPage() {
             projectId={projectId}
             stage="development"
             className="mb-4 shrink-0"
+            selectedId={docView.openId}
+            onSelect={docView.select}
           />
           {/* Segmented header */}
           <div className="flex items-center gap-1 border-b p-2">
@@ -364,7 +370,10 @@ export default function DevelopmentPage() {
 
         {/* Main pane — file viewer */}
         <main className="flex min-h-0 flex-col overflow-hidden">
-          {selectedFile ? (
+          {docView.openDoc ? (
+            <DocumentPreview artifact={docView.openDoc} project={project.name} approvals={docView.approvals}
+              onClose={docView.close} pageName="Development" className="min-h-0 flex-1 overflow-auto" />
+          ) : selectedFile ? (
             <>
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <span className="flex min-w-0 items-center gap-2">

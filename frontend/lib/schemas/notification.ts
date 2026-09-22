@@ -35,6 +35,12 @@ export const NotificationKind = z.enum([
    *  contributors deferred at creation time, not the requester (who already
    *  gets `request_approved`). */
   "project_activated",
+  /** A document was put forward for approval — addressed to the project's admins. */
+  "document_approval_required",
+  /** A document someone put forward was approved or rejected — addressed to
+   *  that person. */
+  "document_approved",
+  "document_rejected",
 ]);
 export type NotificationKind = z.infer<typeof NotificationKind>;
 

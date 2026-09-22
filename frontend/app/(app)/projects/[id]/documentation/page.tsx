@@ -184,7 +184,27 @@ export default function DocumentationPage() {
         </div>
       </div>
 
-      {!prepared ? (
+      {!prepared && openDoc ? (
+        // A document opened from the panel below, before any docs workspace exists — the
+        // documents are this stage's record whether or not the agent has run here.
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+          <DocumentReportView
+            key={openDoc.id}
+            doc={openDoc}
+            project={projectQ.data?.name}
+            status={openRow ? approvalState(openRow).label : undefined}
+            actions={openRow && openRow.status === "draft" && approvals.mayRaise(openRow.stage) ? (
+              <Button size="sm" className="h-8 gap-1.5 text-xs"
+                disabled={approvals.raisingId === openRow.id}
+                onClick={() => approvals.raise(openRow)}>
+                {approvals.raisingId === openRow.id && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
+                Raise for approval
+              </Button>
+            ) : null}
+            onClose={() => setOpenDoc(null)}
+          />
+        </div>
+      ) : !prepared ? (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-xl px-4 py-12">
             <EmptyState icon={BookText} title="No documentation workspace yet"
@@ -197,7 +217,7 @@ export default function DocumentationPage() {
               this they were unreachable on exactly the projects that have never run the
               agent. */}
           <div className="mx-auto max-w-xl px-4 pb-12">
-            <DocumentList projectId={id} stage="documentation" />
+            <DocumentList projectId={id} stage="documentation" selectedId={openDoc?.documentId ?? null} onSelect={openArtifact} />
           </div>
         </div>
       ) : (
