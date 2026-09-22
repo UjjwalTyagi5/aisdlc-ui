@@ -538,6 +538,30 @@ collection time names exactly what to do) — this is deliberate, so "I forgot t
 this up" fails loudly on a fresh machine instead of silently testing against whatever
 `.env` happens to point at.
 
+### The app role, without which a third of the suite cannot pass
+
+```powershell
+cd backend
+uv run python -m scripts.setup_test_app_role
+```
+
+**Copying your `.env`'s credentials means the test app connects as `postgres`, and
+`postgres` is BYPASSRLS.** Around 30 tests assert tenant isolation the way the
+application experiences it — `_events(org_id)` opens a session for one tenant and
+selects from `audit_events` with no tenant filter, because the row-level policy is
+supposed to be the filter. Bypassed, they read every tenant's rows and fail on counts
+like `176 == 1`, alongside `test_app_role_is_not_bypassrls`,
+`test_migrations_dsn_is_not_app_dsn` and the append-only audit tests, which name the
+problem outright. Nothing is wrong with the application; the test connection is simply
+not the kind of connection the application uses.
+
+The script gives `sdlc_product_test` the same two-role shape production has — `postgres`
+for migrations (it must create the policies), `sdlc_app` for the app (NOSUPERUSER,
+NOBYPASSRLS, so they bind) — applies `grant_app_role.sql`, verifies the append-only
+revokes, and rewrites the two app DSNs in `.env.test`, keeping a `.env.test.bak`. It
+refuses to run against a database whose name does not contain "test". Idempotent; re-run
+it after any migration that adds tables.
+
 **Keep it re-migrated.** Same rule as the real database (see "3. Grants for the app
 role" and the migration-lineage troubleshooting above): after `alembic upgrade head`
 adds tables, re-run it against `sdlc_product_test` too, or newer tests that touch those
