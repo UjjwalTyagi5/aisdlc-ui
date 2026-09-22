@@ -56,6 +56,23 @@ class Binding:
     secret_key: str
 
 
+def _configured_host() -> str:
+    """The Langfuse instance this process talks to, normalised the way bindings compare it.
+
+    A BINDING BELONGS TO ONE INSTANCE. Its keys exist only in the Langfuse database that
+    minted them, and `client_for_binding` sends traces to the binding's OWN host. So when
+    LANGFUSE_HOST moves to another instance — the remote one retired for a self-hosted one,
+    or the reverse — a binding recorded against the old instance is not merely stale: used,
+    it sends every trace to a server that is gone, or presents keys the new one has never
+    heard of, and tracing fails open, so nothing says so. Every lookup below is therefore
+    scoped to this host, and a binding for another instance is treated as no binding.
+    Read at call time so a changed setting (or a test) is honoured without a re-import.
+    """
+    from config import env  # noqa: PLC0415
+
+    return (env.LANGFUSE_HOST or "").strip().rstrip("/")
+
+
 def _encrypt(value: str) -> str:
     from shared.services.secret_store import _fernet  # noqa: PLC0415
 
@@ -69,7 +86,7 @@ def _decrypt(value: str) -> str:
 
 
 async def load_binding(session, tenant_id: str, project_id: str) -> Optional[Binding]:
-    """The active binding for one project, or None. Never raises."""
+    """The active binding for one project ON THE CONFIGURED INSTANCE, or None. Never raises."""
     try:
         row = (
             await session.execute(
@@ -77,9 +94,10 @@ async def load_binding(session, tenant_id: str, project_id: str) -> Optional[Bin
                     "select project_id, workspace_id, langfuse_org_id, langfuse_project_id, "
                     "langfuse_host, public_key_encrypted, secret_key_encrypted "
                     "from langfuse_bindings "
-                    "where tenant_id = :t and project_id = :p and is_active = true"
+                    "where tenant_id = :t and project_id = :p and is_active = true "
+                    "  and rtrim(langfuse_host, '/') = :h"
                 ),
-                {"t": str(tenant_id), "p": str(project_id)},
+                {"t": str(tenant_id), "p": str(project_id), "h": _configured_host()},
             )
         ).first()
     except Exception:
@@ -146,16 +164,19 @@ async def ensure_binding(
         async with get_db_session_for_tenant(str(tenant_id)) as revive:
             revived = (
                 await revive.execute(
+                    # Only a binding from THIS instance is revived. One from another
+                    # instance holds keys this Langfuse never minted.
                     text(
                         "update langfuse_bindings set is_active = true, updated_at = now() "
                         "where id = (select id from langfuse_bindings "
                         "            where tenant_id = cast(:t as uuid) "
                         "              and project_id = cast(:p as uuid) "
                         "              and is_active = false "
+                        "              and rtrim(langfuse_host, '/') = :h "
                         "            order by updated_at desc limit 1) "
                         "returning id"
                     ),
-                    {"t": str(tenant_id), "p": str(project_id)},
+                    {"t": str(tenant_id), "p": str(project_id), "h": _configured_host()},
                 )
             ).first()
         if revived is not None:
@@ -218,9 +239,10 @@ async def ensure_binding(
                     text(
                         "select langfuse_project_id from langfuse_bindings "
                         "where tenant_id = cast(:t as uuid) and is_active = true "
-                        "  and project_id <> cast(:p as uuid)"
+                        "  and project_id <> cast(:p as uuid) "
+                        "  and rtrim(langfuse_host, '/') = :h"
                     ),
-                    {"t": str(tenant_id), "p": str(project_id)},
+                    {"t": str(tenant_id), "p": str(project_id), "h": _configured_host()},
                 )
             ).all()
         )
@@ -242,6 +264,33 @@ async def ensure_binding(
         )
         return None
 
+    # RECORD A REPLACED ORGANIZATION ON THE UNIT. When the unit's recorded organization
+    # is gone — a Langfuse rebuilt, or LANGFUSE_HOST moved to another instance —
+    # provisioning makes a replacement, and `_ensure_org` leaves recording it to the
+    # caller. Nothing did. The unit went on naming the vanished id, so its NEXT project
+    # hit the same "no longer exists" path, found the replacement it did not recognise as
+    # its own (ownership is read from that same stale column), refused to adopt it, and
+    # made "PAYMENTS (PWC)" — one Langfuse organization per project instead of per unit,
+    # and org_sync's memberships landed on only one of them.
+    if result.langfuse_org_id and result.langfuse_org_id != unit_org_id:
+        try:
+            from shared.observability.org_sync import _persist_org  # noqa: PLC0415
+
+            await _persist_org(
+                str(tenant_id), workspace_id, result.langfuse_org_id,
+                result.langfuse_org_name or unit_name,
+            )
+            logger.info(
+                "langfuse organization for unit=%s recorded as %s (was %s)",
+                workspace_id, result.langfuse_org_id, unit_org_id,
+            )
+        except Exception:
+            logger.warning(
+                "langfuse organization %s could not be recorded on unit=%s — the unit's "
+                "next project will provision another", result.langfuse_org_id,
+                workspace_id, exc_info=True,
+            )
+
     # A SEPARATE SESSION, DELIBERATELY. Two reasons, and the second is a real bug this
     # had: committing here would commit whatever else the caller has in flight — this is
     # called mid-request from an agent turn — and `get_db_session_for_tenant` sets
@@ -253,6 +302,19 @@ async def ensure_binding(
 
     try:
         async with get_db_session_for_tenant(str(tenant_id)) as write_session:
+            # RETIRE, THEN INSERT. A project can hold one active binding (the partial
+            # unique index), so a binding still active for ANOTHER instance would make the
+            # insert below a silent `on conflict do nothing` and leave this project
+            # tracing nowhere. Deactivated, not deleted: pointing LANGFUSE_HOST back at
+            # that instance revives it, history and keys intact.
+            await write_session.execute(
+                text(
+                    "update langfuse_bindings set is_active = false, updated_at = now() "
+                    "where tenant_id = cast(:t as uuid) and project_id = cast(:p as uuid) "
+                    "  and is_active = true and rtrim(langfuse_host, '/') <> :h"
+                ),
+                {"t": str(tenant_id), "p": str(project_id), "h": _configured_host()},
+            )
             await write_session.execute(
                 text(
                     "insert into langfuse_bindings "
