@@ -1212,6 +1212,8 @@ app.include_router(agent_profiles_router, tags=["agent-profiles"])
 # workspace:manage sentinels so the D-05 boot scan stays green.
 from shared.routers.agent_skills import agent_skills_router
 app.include_router(agent_skills_router, tags=["agent-skills"])
+from shared.routers.tech_stacks import tech_stacks_router
+app.include_router(tech_stacks_router, tags=["tech-stacks"])
 # Per-user/per-agent chat session history (§11A). Creator-scoped in the router +
 # tenant FORCE-RLS in the service; _VIEW_DEP is the floor.
 app.include_router(conversations_router, tags=["conversations"], dependencies=[_VIEW_DEP])
