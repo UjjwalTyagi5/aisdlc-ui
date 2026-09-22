@@ -232,3 +232,32 @@ def test_a_relative_root_is_resolved_against_the_backend_directory(monkeypatch):
     client = storage.build_blob_client()
 
     assert client.root == (BACKEND_ROOT / "files" / "artifact-store").resolve()
+
+
+def test_the_suite_does_not_file_documents_into_the_development_store():
+    """THE TEST SUITE GETS ITS OWN STORE, exactly as it gets its own database.
+
+    Found by running the storage verification against a store holding `brd.pdf` and
+    `policy.pdf` under invented tenant ids: `.env.test` set no ARTIFACT_STORAGE_ROOT, so
+    tests inherited `.env`'s and filed their documents beside the developer's real ones.
+    Nothing failed — until a run needed the store to contain only what the app put there.
+    """
+    import re
+    from pathlib import Path
+
+    from config.env import ARTIFACT_STORAGE_ROOT, BACKEND_ROOT
+
+    dev_env = BACKEND_ROOT / ".env"
+    if not dev_env.exists():  # a machine that runs only tests
+        pytest.skip("no backend/.env to compare against")
+    match = re.search(r"^ARTIFACT_STORAGE_ROOT=(.*)$", dev_env.read_text(encoding="utf-8"), re.M)
+    if not match or not match.group(1).strip():
+        pytest.skip("the development .env sets no ARTIFACT_STORAGE_ROOT")
+
+    dev_root = (BACKEND_ROOT / match.group(1).strip()).resolve()
+    test_root = (BACKEND_ROOT / (ARTIFACT_STORAGE_ROOT or "")).resolve()
+    assert test_root != dev_root, (
+        f"the tests would write documents into the development store ({dev_root}). "
+        f"Set ARTIFACT_STORAGE_ROOT in backend/.env.test — see .env.test.example."
+    )
+    assert Path(test_root) != Path(BACKEND_ROOT), "the store must be a directory of its own"

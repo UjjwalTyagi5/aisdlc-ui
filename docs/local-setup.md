@@ -567,6 +567,15 @@ role" and the migration-lineage troubleshooting above): after `alembic upgrade h
 adds tables, re-run it against `sdlc_product_test` too, or newer tests that touch those
 tables will fail with relation-does-not-exist instead of a real assertion failure.
 
+### The test suite's own document store
+
+`.env.test` also sets `ARTIFACT_STORAGE_ROOT=files/artifact-store-test`. Without it the
+tests inherit `.env`'s root and file their documents into the store the development app
+reads — the dev store fills with `brd.pdf` and `policy.pdf` under invented tenant ids,
+and a test that tidies up could take a real document with it. Same reasoning as the
+separate database, and `test_local_blob_storage.py` fails if the two roots are ever the
+same again.
+
 ---
 
 ## Full rebuild, in order
