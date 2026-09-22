@@ -41,6 +41,10 @@ GRANT_SQL = BACKEND / "scripts" / "grant_app_role.sql"
 APP_ROLE = "sdlc_app"
 APPEND_ONLY = ("audit_events", "governance_request_events")
 
+#: How asyncpg reports a server that offers no TLS — the only case where retrying in
+#: plaintext is right. Anything else (a bad password above all) must surface as itself.
+_NO_TLS_SIGNS = ("does not support SSL", "server does not support", "rejected SSL upgrade")
+
 
 def _read_env(path: pathlib.Path) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -95,11 +99,12 @@ async def main() -> None:
     # on an auth failure, which an unconditional retry would hide behind a misleading
     # "no encryption" message. Same ladder as scripts/grant_app_role.py, for the same
     # reason: Azure Flexible Server refuses plaintext, a local server usually offers no
-    # TLS.
+    # TLS. asyncpg words that refusal more than one way; a native Windows Postgres says
+    # "rejected SSL upgrade", which the first version of this ladder did not recognise.
     try:
         conn = await asyncpg.connect(_plain(migrations_dsn), ssl="require", timeout=30)
     except (asyncpg.exceptions.InvalidAuthorizationSpecificationError, OSError) as exc:
-        if "does not support SSL" not in str(exc) and "server does not support" not in str(exc):
+        if not any(sign in str(exc) for sign in _NO_TLS_SIGNS):
             raise
         conn = await asyncpg.connect(_plain(migrations_dsn), timeout=30)
     try:

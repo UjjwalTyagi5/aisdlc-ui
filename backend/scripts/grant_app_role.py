@@ -70,10 +70,16 @@ async def main() -> None:
     # TLS at all. Try encrypted first and fall back ONLY when the server turns out not to
     # support TLS — never on an auth failure, which an unconditional retry would hide
     # behind a misleading "no encryption" message from the second attempt.
+    #
+    # asyncpg words "this server has no TLS" more than one way. The native Windows
+    # Postgres this project runs on locally says "rejected SSL upgrade", which this check
+    # did not recognise — so the script crashed on every local run, and the workaround
+    # was to monkeypatch asyncpg.connect from outside.
+    no_tls_signs = ("does not support SSL", "server does not support", "rejected SSL upgrade")
     try:
         conn = await asyncpg.connect(dsn, ssl="require", timeout=30)
     except (asyncpg.exceptions.InvalidAuthorizationSpecificationError, OSError) as exc:
-        if "does not support SSL" not in str(exc) and "server does not support" not in str(exc):
+        if not any(sign in str(exc) for sign in no_tls_signs):
             raise
         conn = await asyncpg.connect(dsn, timeout=30)
     try:
