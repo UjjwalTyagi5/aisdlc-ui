@@ -7,7 +7,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]  # platform/backend
-REPO_ROOT = Path(__file__).resolve().parents[3]     # repo root
+# The repo root in a development checkout. `parents[3]` ASSUMED the backend always sits three
+# directories below the filesystem root, and raised IndexError at import when it does not —
+# deploying `backend/` on its own (`/opt/sdlc/config/env.py`) killed the process before a
+# single setting was read. Fall back to the highest ancestor there is.
+_ANCESTORS = Path(__file__).resolve().parents
+REPO_ROOT = _ANCESTORS[3] if len(_ANCESTORS) > 3 else _ANCESTORS[-1]
 load_dotenv(BACKEND_ROOT / ".env")
 
 # ── where secrets come from ──────────────────────────────────────────────────

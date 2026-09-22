@@ -183,7 +183,7 @@ Three notes on that command:
   degrades the protection rather than removing it — the frame still arrives, it is
   just refused before being parsed.
 
-> **Keep `watchfiles` installed.** It is pinned in `requirements.txt`/`pyproject.toml`
+> **Keep `watchfiles` installed.** It is pinned in `pyproject.toml`
 > and `--reload` depends on it. Without it uvicorn silently falls back to `StatReload`,
 > which `os.stat()`s every `.py` file under `backend/` four times a second — including
 > the ~15k files in `.venv`. One sweep takes ~4s on a laptop, so the watcher never
