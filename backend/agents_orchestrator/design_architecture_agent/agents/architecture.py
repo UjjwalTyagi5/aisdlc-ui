@@ -354,8 +354,15 @@ async def _markdown_to_pdf(markdown_string: str, pdf_path: str, *, title: str = 
     plain renderer so the user still gets a PDF. The scratch .docx is removed because
     nothing announces it: a file in the output directory that no reply links to is
     one the user cannot reach, and `save_architecture` makes a Word file on request.
+
+    BOTH scratch files go. `_markdown_to_docx` also writes the document's markdown
+    beside itself as the page copy the app renders (`artifact_page.sibling_markdown_path`),
+    so converting to PDF left a `<name>.pdf-source.md` in the output directory — a file
+    no reply links to, named after a scratch file, sitting next to every PDF the Design
+    agent produced. A PDF needs no page copy: the browser draws the PDF itself.
     """
     docx_path = os.path.splitext(pdf_path)[0] + ".pdf-source.docx"
+    scratch = (docx_path, os.path.splitext(docx_path)[0] + ".md")
     try:
         await _markdown_to_docx(markdown_string, docx_path)
         loop = asyncio.get_event_loop()
@@ -370,10 +377,11 @@ async def _markdown_to_pdf(markdown_string: str, pdf_path: str, *, title: str = 
             exc_info=True,
         )
     finally:
-        try:
-            os.remove(docx_path)
-        except OSError:
-            pass
+        for path in scratch:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     from shared.tools.pdf_render import markdown_to_pdf  # noqa: PLC0415
 
