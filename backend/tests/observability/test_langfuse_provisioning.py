@@ -91,3 +91,50 @@ async def test_missing_salt_is_refused_rather_than_guessed():
             unit_name="unit", project_name="project"
         )
     assert "LANGFUSE_SALT" in str(ei.value)
+
+
+# ── TLS: required unless LANGFUSE_DB_URL says otherwise ─────────────────────────
+
+
+async def _connect_kwargs(monkeypatch, db_url: str) -> dict:
+    """The keyword arguments `_connect` hands asyncpg for this URL, with no database."""
+    import asyncpg
+
+    seen: dict = {}
+
+    async def _fake_connect(dsn, **kwargs):
+        seen.update(kwargs, dsn=dsn)
+        return object()
+
+    monkeypatch.setattr(asyncpg, "connect", _fake_connect)
+    await LangfuseProvisioner(db_url=db_url, salt="salt")._connect()
+    return seen
+
+
+async def test_tls_is_required_when_the_url_does_not_say(monkeypatch):
+    """Azure Postgres — the case this used to hard-code — keeps demanding TLS."""
+    seen = await _connect_kwargs(monkeypatch, "postgresql://u:p@db.azure.example:5432/langfuse")
+    assert seen["ssl"] == "require"
+
+
+async def test_an_explicit_sslmode_is_obeyed_not_overridden(monkeypatch):
+    """A Postgres on the same host (the self-hosted VM) usually has no TLS. Writing
+    `?sslmode=disable` is how the operator says so; passing ssl="require" on top would
+    override it and make that Langfuse unreachable, which is what it used to do."""
+    seen = await _connect_kwargs(
+        monkeypatch, "postgresql+asyncpg://u:p@localhost:5433/langfuse?sslmode=disable"
+    )
+    assert "ssl" not in seen
+    assert seen["dsn"] == "postgresql://u:p@localhost:5433/langfuse?sslmode=disable"
+
+
+async def test_a_refused_tls_handshake_says_how_to_fix_it(monkeypatch):
+    """No silent fallback to plaintext — but the error names the setting to change."""
+    import asyncpg
+
+    async def _refuse(dsn, **kwargs):
+        raise ConnectionError('PostgreSQL server at "localhost:5433" rejected SSL upgrade')
+
+    monkeypatch.setattr(asyncpg, "connect", _refuse)
+    with pytest.raises(LangfuseProvisioningError, match="sslmode=disable"):
+        await LangfuseProvisioner(db_url="postgresql://u:p@localhost:5433/langfuse", salt="s")._connect()

@@ -56,6 +56,14 @@ from config.env import (
 
 logger = logging.getLogger(__name__)
 
+
+def _has_sslmode(dsn: str) -> bool:
+    """Does the connection URL state its own `sslmode`? Then it is obeyed as written."""
+    from urllib.parse import parse_qs, urlsplit  # noqa: PLC0415
+
+    return "sslmode" in parse_qs(urlsplit(dsn).query)
+
+
 # Only these tables are ever written. Not a security boundary — the DSN already grants
 # everything — but it keeps a typo or a future edit from reaching Langfuse's trace data.
 _WRITABLE_TABLES = frozenset(
@@ -136,6 +144,9 @@ class ProvisionedProject:
     host: str
     created_org: bool
     created_project: bool
+    #: The organization's name as provisioned — which is not always the unit's name
+    #: (`_available_org_name` may suffix it). Recorded on the unit with its id.
+    langfuse_org_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,12 +243,30 @@ class LangfuseProvisioner:
         dsn = self.db_url.replace("postgresql+asyncpg://", "postgresql://").replace(
             "postgresql+psycopg://", "postgresql://"
         )
+        # TLS IS REQUIRED UNLESS THE URL SAYS OTHERWISE. This used to pass ssl="require"
+        # unconditionally, which is right for Azure Postgres and made a Langfuse whose
+        # Postgres sits on the same host — the self-hosted VM, a developer's machine —
+        # unreachable, since a local server usually offers no TLS at all. An explicit
+        # `sslmode` in LANGFUSE_DB_URL is now honoured as written (asyncpg reads it from
+        # the DSN); without one the old requirement stands. No silent fallback to
+        # plaintext: dropping TLS is something the operator writes down, not something a
+        # failed handshake decides.
+        ssl_kwargs = {} if _has_sslmode(dsn) else {"ssl": "require"}
         try:
-            return await asyncpg.connect(dsn, ssl="require", timeout=30)
+            return await asyncpg.connect(dsn, timeout=30, **ssl_kwargs)
         except Exception as exc:
+            hint = (
+                "On Azure this is usually a firewall rule missing for this host."
+                if ssl_kwargs
+                else "Check the host, port and credentials in LANGFUSE_DB_URL."
+            )
+            if ssl_kwargs and "SSL" in str(exc):
+                hint = (
+                    "The server refused TLS. A Postgres on the same host usually has none: "
+                    "add ?sslmode=disable to LANGFUSE_DB_URL if that is the case."
+                )
             raise LangfuseProvisioningError(
-                f"cannot reach the Langfuse database: {type(exc).__name__}. "
-                f"On Azure this is usually a firewall rule missing for this host."
+                f"cannot reach the Langfuse database: {type(exc).__name__}. {hint}"
             ) from exc
 
     async def _assert_schema(self, conn) -> None:
@@ -606,7 +635,7 @@ class LangfuseProvisioner:
         try:
             await self._assert_schema(conn)
             async with conn.transaction():
-                org_id, _org_name, created_org = await self._ensure_org(
+                org_id, org_name, created_org = await self._ensure_org(
                     conn, unit_name, org_id=org_id, owned_org_ids=owned_org_ids
                 )
                 project_id, created_project = await self._ensure_project(
@@ -631,6 +660,7 @@ class LangfuseProvisioner:
                 host=self.host,
                 created_org=created_org,
                 created_project=created_project,
+                langfuse_org_name=org_name,
             )
         finally:
             await conn.close()
