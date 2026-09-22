@@ -150,7 +150,7 @@ Copy `backend/.env` from a working environment, or build it from
 | `DEFAULT_ORG_SLUG`, `DEFAULT_ORG_NAME`, `ORG_ADMIN_EMAILS`, `ORG_ADMIN_PASSWORD` | first-boot organisation and its first admin. **`ORG_ADMIN_PASSWORD` is a secret** |
 | `ARTIFACT_STORAGE_ROOT` / `AZURE_BLOB_ACCOUNT_URL` / `STORAGE_BACKEND` | where documents are stored — §5 |
 | `SMTP_*`, `EMAIL_FROM` | invitations and password resets. **`SMTP_PASSWORD` is a secret** |
-| `ENABLE_LANGFUSE`, `LANGFUSE_*` | model tracing; leave disabled if you have no Langfuse |
+| `ENABLE_LANGFUSE`, `LANGFUSE_*` | model tracing. A self-hosted Langfuse without Docker is a separate kit, `langfuse-deploy` (see "Observability" below); its `bin/backend-env.sh` prints exactly these values. Leave disabled if you have no Langfuse |
 | `AGENT_RUNTIME_MODE` | `local` keeps agent state in memory (matches the one-worker rule) |
 | `MCP_ENABLED`, `MCP_STDIO_*` | Model Context Protocol tools; leave off unless used |
 
@@ -168,6 +168,18 @@ Keep `.env` out of git (it already is) and readable only by the service user:
 
 `NEXT_PUBLIC_*` values are baked into the browser bundle **at build time**. Changing one means
 rebuilding the frontend.
+
+**Observability (Langfuse).** Langfuse v3 runs on the same VM without Docker from a separate
+kit, `langfuse-deploy` (kept beside, not inside, this repository): it builds Langfuse from
+source and installs ClickHouse, a second Redis on 6380 and an S3 store as systemd services.
+Its README is the procedure; the backend side is three facts:
+
+- paste the block `bash langfuse-deploy/bin/backend-env.sh` prints into `backend/.env`;
+- **`LANGFUSE_SALT` must equal Langfuse's `SALT`** — the backend mints each project's API keys
+  straight into Langfuse's database, and with another salt every one of them answers 401 while
+  tracing, which fails open, simply goes quiet;
+- `LANGFUSE_DB_URL` carries `sslmode=disable` for a Postgres on the same host. Without an
+  `sslmode` the backend requires TLS to that database, as it always did for Azure.
 
 ---
 
