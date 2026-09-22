@@ -1150,6 +1150,50 @@ class AgentSkillToggle(Base):
     )
 
 
+class TechStackRecord(Base):
+    """A named tech stack a Business Unit offers its projects, or a project keeps (0065).
+
+    `scope` is "workspace" (a Business Unit's; `workspace_id` set) or "project" (`project_id`
+    set). At most one live `is_default` per Business Unit. Deleting is soft (`deleted_at`),
+    so a project that chose it can be told what happened. Rules: shared/services/tech_stack.py."""
+
+    __tablename__ = "tech_stacks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    categories: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict,
+                                             server_default=text("'{}'::jsonb"))
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
+                                             server_default=text("false"))
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    updated_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProjectTechStackSelection(Base):
+    """Which tech stack a project follows (0065). No row = its Business Unit's default."""
+
+    __tablename__ = "project_tech_stack_selections"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    tech_stack_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tech_stacks.id", ondelete="CASCADE"), nullable=False)
+    selected_by: Mapped[str | None] = mapped_column(String(255))
+    selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # ---------------------------------------------------------------------------
 # Identity table (GLOBAL â€” non-RLS; login lookup precedes tenant context, D-08)
 # ---------------------------------------------------------------------------

@@ -631,8 +631,11 @@ QUALITY RULES:
 """
 
 
-def build_generation_prompt(requested: Iterable[str], custom_prompt: str = "") -> str:
-    """The generation prompt for exactly these components. Raises on an unknown one."""
+def build_generation_prompt(requested: Iterable[str], custom_prompt: str = "", tech_stack: str = "") -> str:
+    """The generation prompt for exactly these components. Raises on an unknown one.
+
+    `tech_stack` is the project's mandatory tech-stack block (`tech_stack.render_for_prompt`),
+    placed after the grounding and before the templates; '' leaves the prompt as it was."""
     ids = resolve(requested)
     selected = [BY_ID[i] for i in ids]
     headers = ", ".join(f"`## {c.header}`" for c in selected)
@@ -648,6 +651,8 @@ def build_generation_prompt(requested: Iterable[str], custom_prompt: str = "") -
     head = _GROUNDING.format(
         custom_prompt=custom_prompt or "", headers=headers, checklist=checklist,
     )
+    if tech_stack:
+        head = head + "\n" + tech_stack + "\n"
     body = "\n---\n\n".join(c.template.rstrip() + "\n" for c in selected)
     return head + "\n" + body + "\n" + _QUALITY
 
