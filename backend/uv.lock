@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = "==3.12.*"
+resolution-markers = [
+    "sys_platform != 'win32'",
+    "sys_platform == 'win32'",
+]
 
 [manifest]
 overrides = [{ name = "google-ai-generativelanguage", specifier = "==0.6.18" }]
@@ -2656,8 +2660,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/30/93/e79bd9cbecc3267499d9ead919bd61f7ddf55d793fb5ef2b1d7d92444f35/ruamel_yaml_clib-0.2.15-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:4b293a37dc97e2b1e8a1aec62792d1e52027087c8eea4fc7b5abd2bdafdd6642", size = 743203, upload-time = "2025-11-16T16:13:28.671Z" },
     { url = "https://files.pythonhosted.org/packages/8d/06/1eb640065c3a27ce92d76157f8efddb184bd484ed2639b712396a20d6dce/ruamel_yaml_clib-0.2.15-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:512571ad41bba04eac7268fe33f7f4742210ca26a81fe0c75357fa682636c690", size = 747292, upload-time = "2025-11-16T20:22:48.584Z" },
     { url = "https://files.pythonhosted.org/packages/a5/21/ee353e882350beab65fcc47a91b6bdc512cace4358ee327af2962892ff16/ruamel_yaml_clib-0.2.15-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:e5e9f630c73a490b758bf14d859a39f375e6999aea5ddd2e2e9da89b9953486a", size = 771624, upload-time = "2025-11-16T16:13:29.853Z" },
-    { url = "https://files.pythonhosted.org/packages/57/34/cc1b94057aa867c963ecf9ea92ac59198ec2ee3a8d22a126af0b4d4be712/ruamel_yaml_clib-0.2.15-cp312-cp312-win32.whl", hash = "sha256:f4421ab780c37210a07d138e56dd4b51f8642187cdfb433eb687fe8c11de0144", size = 100342, upload-time = "2025-11-16T16:13:31.067Z" },
-    { url = "https://files.pythonhosted.org/packages/b3/e5/8925a4208f131b218f9a7e459c0d6fcac8324ae35da269cb437894576366/ruamel_yaml_clib-0.2.15-cp312-cp312-win_amd64.whl", hash = "sha256:2b216904750889133d9222b7b873c199d48ecbb12912aca78970f84a5aa1a4bc", size = 119013, upload-time = "2025-11-16T16:13:32.164Z" },
 ]
 
 [[package]]
@@ -2791,7 +2793,7 @@ dependencies = [
     { name = "requests-toolbelt" },
     { name = "rsa" },
     { name = "selenium" },
-    { name = "semgrep" },
+    { name = "semgrep", marker = "sys_platform != 'win32'" },
     { name = "setuptools" },
     { name = "six" },
     { name = "slack-sdk" },
@@ -2963,7 +2965,7 @@ requires-dist = [
     { name = "requests-toolbelt", specifier = "==1.0.0" },
     { name = "rsa", specifier = "==4.9.1" },
     { name = "selenium", specifier = "==4.35.0" },
-    { name = "semgrep", specifier = "==1.173.0" },
+    { name = "semgrep", marker = "sys_platform != 'win32'", specifier = "==1.173.0" },
     { name = "setuptools", specifier = "==80.10.2" },
     { name = "six", specifier = "==1.17.0" },
     { name = "slack-sdk", specifier = "==3.42.0" },
@@ -3055,7 +3057,6 @@ dependencies = [
     { name = "packaging" },
     { name = "peewee" },
     { name = "pyjwt", extra = ["crypto"] },
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "requests" },
     { name = "rich" },
     { name = "ruamel-yaml" },
@@ -3074,7 +3075,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/32/ea/dbcdc05e4954be743f8f87a8feb41eabd3a2d13bd34687bfaae864a2c315/semgrep-1.173.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-manylinux_2_34_x86_64.whl", hash = "sha256:cb21aa06246bdd79d3e9e7f9118ec7baecb1be39cf89c46e07af13b4128d7b79", size = 69801425, upload-time = "2026-08-13T16:52:52.191Z" },
     { url = "https://files.pythonhosted.org/packages/74/da/18d28f071847b11ef2d71bebad21febbfd55daeb78799a46b49283c34632/semgrep-1.173.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-musllinux_1_2_aarch64.whl", hash = "sha256:a4f690a9a3f0ad11a862844e9e7c1efd75ed72293eb488e7ea438111b138b5f9", size = 78754000, upload-time = "2026-08-13T16:53:01.9Z" },
     { url = "https://files.pythonhosted.org/packages/f6/32/6d4ab72c72248798c2677d6252f56e7b786ce6ea584fa710d2c747c7e6ee/semgrep-1.173.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-musllinux_1_2_x86_64.whl", hash = "sha256:f9a71d2e692ebf96fdf1640eed0291faa947642c8d5b98478b60ea815ca8bc67", size = 76262603, upload-time = "2026-08-13T16:53:10.319Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/99/63304ddfa4ca832f9d6921e79e3b96105760b3e8d250bffc7d8cde79bf02/semgrep-1.173.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-win_amd64.whl", hash = "sha256:29a7371b27ed57f464e57c85c2fcfac4352fa67241092405daa21e21f9dea629", size = 57431998, upload-time = "2026-08-13T16:53:17.467Z" },
 ]
 
 [[package]]
@@ -3307,9 +3307,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/10/90/d62ce007a1c80d0b2c93e02cab211224756240884751b94ca72df8a875ca/tomli-2.4.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:136443dbd7e1dee43c68ac2694fde36b2849865fa258d39bf822c10e8068eac5", size = 253341, upload-time = "2026-03-25T20:21:25.177Z" },
     { url = "https://files.pythonhosted.org/packages/1a/7e/caf6496d60152ad4ed09282c1885cca4eea150bfd007da84aea07bcc0a3e/tomli-2.4.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:5e262d41726bc187e69af7825504c933b6794dc3fbd5945e41a79bb14c31f585", size = 248159, upload-time = "2026-03-25T20:21:26.364Z" },
     { url = "https://files.pythonhosted.org/packages/99/e7/c6f69c3120de34bbd882c6fba7975f3d7a746e9218e56ab46a1bc4b42552/tomli-2.4.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:5cb41aa38891e073ee49d55fbc7839cfdb2bc0e600add13874d048c94aadddd1", size = 253290, upload-time = "2026-03-25T20:21:27.46Z" },
-    { url = "https://files.pythonhosted.org/packages/d6/2f/4a3c322f22c5c66c4b836ec58211641a4067364f5dcdd7b974b4c5da300c/tomli-2.4.1-cp312-cp312-win32.whl", hash = "sha256:da25dc3563bff5965356133435b757a795a17b17d01dbc0f42fb32447ddfd917", size = 98141, upload-time = "2026-03-25T20:21:28.492Z" },
-    { url = "https://files.pythonhosted.org/packages/24/22/4daacd05391b92c55759d55eaee21e1dfaea86ce5c571f10083360adf534/tomli-2.4.1-cp312-cp312-win_amd64.whl", hash = "sha256:52c8ef851d9a240f11a88c003eacb03c31fc1c9c4ec64a99a0f922b93874fda9", size = 108847, upload-time = "2026-03-25T20:21:29.386Z" },
-    { url = "https://files.pythonhosted.org/packages/68/fd/70e768887666ddd9e9f5d85129e84910f2db2796f9096aa02b721a53098d/tomli-2.4.1-cp312-cp312-win_arm64.whl", hash = "sha256:f758f1b9299d059cc3f6546ae2af89670cb1c4d48ea29c3cacc4fe7de3058257", size = 95088, upload-time = "2026-03-25T20:21:30.677Z" },
     { url = "https://files.pythonhosted.org/packages/7b/61/cceae43728b7de99d9b847560c262873a1f6c98202171fd5ed62640b494b/tomli-2.4.1-py3-none-any.whl", hash = "sha256:0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe", size = 14583, upload-time = "2026-03-25T20:22:03.012Z" },
 ]
 

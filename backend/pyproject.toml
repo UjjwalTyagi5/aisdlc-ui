@@ -134,7 +134,11 @@ dependencies = [
     "requests-toolbelt==1.0.0",
     "rsa==4.9.1",
     "selenium==4.35.0",
-    "semgrep==1.173.0",
+    # SAST for the Security and Code Review agents, found on PATH via shutil.which.
+    # NOT on Windows: that wheel ships a semgrep-core binary without its .exe extension
+    # and crashes every scan, so Windows developers install it by hand
+    # (docs/local-setup.md). On Linux it is an ordinary wheel.
+    "semgrep==1.173.0 ; sys_platform != 'win32'",
     "setuptools==80.10.2",
     "six==1.17.0",
     "slack_sdk==3.42.0",
