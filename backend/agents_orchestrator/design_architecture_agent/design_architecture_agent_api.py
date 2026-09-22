@@ -565,10 +565,10 @@ async def chat(
         sys_content = DESIGN_SYS_MESSAGE
         if session_context:
             sys_content = DESIGN_SYS_MESSAGE + "\n\n" + session_context
-        # Agent-profile prompt layer (design §3.4). This REST endpoint carries no tenant_id
-        # (unlike the WS path), so injection is a no-op here — kept for parity and to pick up
-        # a profile automatically if this endpoint ever gains a tenant. Fail-soft to base.
-        sys_content, _ = await resolve_agent_turn("design", sys_content, None, _lf_pid)
+        # Agent-profile prompt layer (design §3.4). This endpoint DOES have the caller's
+        # tenant (`real_tenant_id`, from the request); it passed None, so neither the profile
+        # nor the skills ever applied here. Fail-soft to base.
+        sys_content, _ = await resolve_agent_turn("design", sys_content, real_tenant_id or None, _lf_pid)
         new_messages = [SystemMessage(content=sys_content)] + new_messages
         _initialized_sessions.add(session_id)
 
@@ -591,7 +591,7 @@ async def chat(
     total_output_tokens = 0
     start_ms = int(asyncio.get_event_loop().time() * 1000)
 
-    _design_skills_rest = await resolve_agent_skills("design", None, _lf_pid)
+    _design_skills_rest = await resolve_agent_skills("design", real_tenant_id or None, _lf_pid)
     from shared.services.agent_run import agent_run_scope  # noqa: PLC0415
     try:
         async with agent_run_scope(
