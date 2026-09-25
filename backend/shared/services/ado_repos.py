@@ -54,6 +54,38 @@ async def _get_json(url: str, pat: str | None = None) -> dict:
         return r.json()
 
 
+def org_base_from_repo_url(repo_url: str) -> str:
+    """The organisation base URL of a cloned ADO remote, or "" if it is not one.
+
+    WHY A CALLER WOULD WANT THIS RATHER THAN resolve_auth(). A prepared target already
+    holds the remote it cloned AND pushed with; re-deriving the organisation from the
+    connector registry can answer differently, and did: resolve_auth() without
+    project_id/owner_id only sees TENANT-WIDE connectors, so on a project whose Azure
+    DevOps credential is the per-person, per-project kind (the Integrations page's
+    own default) it returned nothing and the caller reported "Azure DevOps is not
+    configured" — about a repository it had just cloned with that very credential.
+
+    Both remote shapes reduce to scheme + host + organisation:
+        https://dev.azure.com/{org}/{project}/_git/{repo}   -> https://dev.azure.com/{org}
+        https://{org}.visualstudio.com/{project}/_git/{repo} -> https://{org}.visualstudio.com
+    Any credential embedded in the URL is dropped — this value reaches log lines.
+    """
+    parsed = urllib.parse.urlsplit((repo_url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return ""
+    host = parsed.hostname.lower()
+    port = f":{parsed.port}" if parsed.port else ""
+    if host.endswith(".visualstudio.com"):
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
+    if host == "dev.azure.com" or host.endswith(".dev.azure.com"):
+        org = next((seg for seg in parsed.path.split("/") if seg), "")
+        # "_git" as the first segment means the org is not in the path at all; there is
+        # no base to build, and guessing one would point writes at the wrong account.
+        if org and org != "_git":
+            return f"{parsed.scheme}://{parsed.hostname}{port}/{org}"
+    return ""
+
+
 async def resolve_auth(
     tenant_id: str = "", *, project_id: str = "", owner_id: str = ""
 ) -> tuple[str, str]:

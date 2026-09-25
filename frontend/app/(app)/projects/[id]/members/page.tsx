@@ -22,13 +22,12 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { OnboardPersonDialog } from "@/components/app/onboard-person-dialog";
+import { AddProjectMembersDialog } from "@/components/app/add-project-members-dialog";
 import { RequestCrossBuMemberDialog } from "@/components/app/request-cross-bu-member-dialog";
 import { BUSINESS_UNIT_LABEL } from "@/lib/scope";
 import { useSession } from "@/hooks/use-session";
 import { hasPermission } from "@/lib/auth/permissions";
 import {
-  addProjectMember,
   listProjectMembers,
   removeProjectMember,
   updateProjectMemberAgents,
@@ -97,19 +96,6 @@ export default function ProjectMembersPage() {
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: qk.projectMembers.list(id) });
-
-  const addMutation = useMutation({
-    mutationFn: (input: { email: string; displayName?: string; roleName: string }) =>
-      addProjectMember(id, input),
-    onSuccess: (member) => {
-      toast.success(
-        member.status === "invited"
-          ? `${member.identity.displayName} onboarded and invited`
-          : `${member.identity.displayName} added to this project`,
-      );
-      invalidate();
-    },
-  });
 
   const removeMutation = useMutation({
     mutationFn: (membershipId: string) => removeProjectMember(id, membershipId),
@@ -409,13 +395,18 @@ export default function ProjectMembersPage() {
         </p>
       )}
 
-      <OnboardPersonDialog
+      {/* The same staging the create-project dialog offers: pick from the
+          Business Unit's roster, see the role's agents, grant extras — rather
+          than a bare email-and-role form that says nothing about access. */}
+      <AddProjectMembersDialog
         open={addOpen}
         onOpenChange={setAddOpen}
+        projectId={id}
+        track={projectQ.data?.track ?? "greenfield"}
+        workspaceId={projectQ.data?.workspaceId}
         roleOptions={contributorRoles}
-        title="Add a project member"
-        description="Assign a contributor role — they get that role's agent access on this project automatically."
-        onSubmit={(input) => addMutation.mutateAsync(input)}
+        existingEmails={members.flatMap((m) => (m.identity.email ? [m.identity.email] : []))}
+        onAdded={invalidate}
       />
 
       <RequestCrossBuMemberDialog

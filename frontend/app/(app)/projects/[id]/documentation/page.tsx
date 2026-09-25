@@ -36,7 +36,7 @@ import type { Artifact, ProjectId } from "@/lib/schemas";
 interface QuickAction { key: string; label: string; icon: React.ComponentType<{ className?: string }>; prompt: string; }
 const QUICK_ACTIONS: QuickAction[] = [
   { key: "doc_set", label: "Doc set", icon: BookText, prompt: "Generate the full documentation set (Overview, Software Design Document, API Reference, and Code & Change Summary), saving each as its own document." },
-  { key: "changelog", label: "Changelog", icon: History, prompt: "Generate a grouped changelog from the git history and save it." },
+  { key: "changelog", label: "Changelog", icon: History, prompt: "Generate a grouped changelog from the git history, tie each commit to the epic or user story it delivers using the upstream requirements and the approved project documents, leave any commit you cannot tie to one unchanged, and save it." },
   { key: "release_notes", label: "Release notes", icon: Notebook, prompt: "Generate business-readable release notes (features, fixes, breaking changes, migration steps) and save them." },
   { key: "rtm", label: "Traceability matrix", icon: ListChecks, prompt: "Generate a Requirements Traceability Matrix (requirement → design → code → test → finding) from the upstream artifacts and repo, and save it." },
   { key: "run_summary", label: "Run summary", icon: FileText, prompt: "Generate an executive run summary (scope delivered, quality posture, outstanding risks) and save it." },

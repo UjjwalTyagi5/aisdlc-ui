@@ -15,6 +15,13 @@ the procedure.
 | [deploy-linux-vm.md](deploy-linux-vm.md) | **The procedure.** System packages, configuration, database, storage, frontend build, systemd, nginx, smoke tests, backups, and what differs on Linux |
 | **`langfuse-deploy/README.md`** — a sibling folder of this repository, delivered alongside it | Self-hosting Langfuse (traces and cost) without Docker, on the same VM. Deliberately outside this repository: it deploys upstream Langfuse, not this product |
 
+## Presenting the platform
+
+| Document | What it gives you |
+|---|---|
+| [cxo-capability-deck-client.md](cxo-capability-deck-client.md) | **The deck you present.** Ten slides for a CXO audience in any industry, carrying only capabilities that are built and have run on a real project: headline, on-screen content, what to say, and the executive question each slide answers |
+| [cxo-capability-deck.md](cxo-capability-deck.md) | **The internal edition.** The same ten slides plus a claims ledger — built and demonstrated against designed-but-not-built — and the known rough edges. Read before presenting |
+
 ## Running it on a development machine
 
 | Document | What it gives you |

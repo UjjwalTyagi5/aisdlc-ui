@@ -55,8 +55,18 @@ export const AgentProfileVersion = z.object({
    *  lib/governance.ts). Distinct from created_by/created_at, which stay the
    *  original drafter's — a non-owner can draft content that someone else
    *  approves. Null until the version has been made active at least once. */
-  published_by: z.string().nullable(),
-  published_at: z.string().nullable(),
+  /*
+   * NULLISH, NOT MERELY NULLABLE, because the server does not send these keys at
+   * all: `agent_profiles` has no published_by/published_at column and
+   * `_version_dict` cannot serialise what does not exist. Requiring them made
+   * every agent-profile response fail validation — saving a draft answered
+   * "Server returned an unexpected shape" on a request the backend had already
+   * committed, which reads as data loss and is not. Accepting their absence is
+   * describing the API as it is; the governance display below stays dark until
+   * the backend records who published a version.
+   */
+  published_by: z.string().nullish(),
+  published_at: z.string().nullish(),
 });
 export type AgentProfileVersion = z.infer<typeof AgentProfileVersion>;
 

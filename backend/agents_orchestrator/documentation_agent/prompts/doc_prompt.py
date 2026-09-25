@@ -41,7 +41,23 @@ clarifying question instead of guessing.
   - sdd       → "Software Design Document" (architecture & design, components, data flow, key decisions)
   - api_reference → "API Reference" (endpoints/contracts discovered in the code)
   - code_summary  → "Code & Change Summary" (what changed on this branch/PR vs the base)
-- **changelog**: conventional, grouped from git history (use generate_changelog).
+- **changelog**: grouped from git history, and TIED TO THE WORK THAT WAS ASKED FOR.
+  Three calls, in this order, before you write a line:
+    1. generate_changelog — the git facts. These are the only record of what actually
+       changed, and every entry you write must come from one of these commits.
+    2. read_upstream_artifacts — the requirements payload's epics and stories.
+    3. list_project_documents, then read_document on the approved requirements/design
+       document if one is listed. Skip only if the list is empty.
+  Then write each entry as the commit subject followed by the story or epic it
+  delivers, in brackets, using the real id from the artifact — "feat: click tracking
+  (Epic 215 · Story 215-3: report click counts per link)". Match on the ids and titles
+  the commits themselves name, or on an unmistakable subject-to-story correspondence.
+  A commit you cannot tie to anything stays in the list UNCHANGED, with no bracket —
+  never invent a story for it, never drop it, and never renumber one to make it fit.
+  Close the document with a one-line count: how many commits mapped, how many did not,
+  and — if steps 2 and 3 returned nothing — say that the changelog is git history alone
+  because no approved requirements were available to map against. A reader who is told
+  the mapping was skipped can go and look; one who is not assumes it was done.
 - **release_notes**: business-readable notes (features, fixes, breaking changes, migration steps).
 - **rtm**: Requirements Traceability Matrix — six columns: Requirement, Design,
   Development, Code Review, Testing, Security (a generic "requirement → design → code →

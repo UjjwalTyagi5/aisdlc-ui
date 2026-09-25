@@ -1,9 +1,5 @@
 # What this platform is, and what it is made of
 
-For someone who is about to deploy it and has not seen the code. No prior context assumed.
-Everything here is what the repository actually declares; the file to check is named beside
-each claim.
-
 ## In one paragraph
 
 An AI-assisted software delivery platform. A person signs in, opens a project, and works with

@@ -82,3 +82,15 @@ langfuse_cred_help
 
 # Throwaway API-key connectivity check — the Anthropic key is pasted inline.
 test_claude_key.py
+
+# Build output and dependencies that landed at the REPO ROOT. frontend/.gitignore
+# already covers these, but only inside frontend/ — an npm/next run started from the
+# root puts them here instead, where nothing was ignoring them. Two directories of
+# build output are one `git add .` away from a five-figure file count in a commit.
+/node_modules/
+/.next/
+/tsconfig.tsbuildinfo
+
+# Source archives of the frontend, made by hand before risky changes. They are
+# snapshots of files already in git, at tens of megabytes each.
+*.rar

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   Boxes, CheckCircle2, Download, FileCode2, GitBranch, GitPullRequest, Loader2, MessageSquare,
   Rocket, ScrollText, ShieldCheck, ShieldAlert, Sparkles,
@@ -37,6 +38,9 @@ import type { PrepareDeployResult, DeploymentArtifact } from "@/lib/schemas/depl
 import type { ProjectId } from "@/lib/schemas";
 
 type Tab = "readiness" | "artifacts" | "runbooks" | "compliance" | "deployments";
+
+/** One id, so the pending toast is REPLACED by its outcome rather than joined by it. */
+const PR_TOAST = "deployment-pr";
 
 const RISK: Record<string, string> = {
   critical: "bg-destructive/15 text-destructive border-destructive/30",
@@ -120,14 +124,40 @@ export default function DeploymentPage() {
     enabled: !!prepared && !!chat.sessionId,
     refetchInterval: chat.busy ? 4000 : false,
   });
+  // "Open deployment PR" is the one button here whose work happens inside the chat.
+  // This ref carries that intent across the turn so its OUTCOME can be reported where
+  // the click happened — see openPr below.
+  const prRequested = React.useRef(false);
   const prevBusy = React.useRef(chat.busy);
   React.useEffect(() => {
     if (prevBusy.current && !chat.busy) {
-      void releaseQ.refetch();
       void queryClient.invalidateQueries({ queryKey: qk.artifacts.forProject(id) });
+      void releaseQ.refetch().then(({ data }) => {
+        if (!prRequested.current) return;
+        prRequested.current = false;
+        const url = data?.release?.pr_url;
+        if (url) {
+          toast.success("Deployment PR opened", {
+            id: PR_TOAST,
+            description: "The staged files were pushed and the pull request is open.",
+            action: { label: "Open PR", onClick: () => window.open(url, "_blank", "noopener") },
+          });
+          return;
+        }
+        // The agent's own words, not a generic failure: it is the only place the
+        // reason exists, and the reason is the whole point of the message. A push
+        // that landed without its PR says so there, and nowhere else.
+        const said = [...chat.messages].reverse().find((m) => m.role === "agent")?.content;
+        toast.error("The deployment PR was not opened", {
+          id: PR_TOAST,
+          description: said?.trim() || "The agent did not say why. Open Chat for the full reply.",
+          duration: 15000,
+          action: { label: "Open Chat", onClick: () => setChatOpen(true) },
+        });
+      });
     }
     prevBusy.current = chat.busy;
-  }, [chat.busy, releaseQ, queryClient, id]);
+  }, [chat.busy, chat.messages, releaseQ, queryClient, id]);
 
   const onPrepared = (r: PrepareDeployResult) => {
     setPrepared(r);
@@ -137,7 +167,14 @@ export default function DeploymentPage() {
     );
   };
   const openPr = () => {
-    setChatOpen(false);
+    // THE CHAT IS NOT CLOSED ANY MORE. It was, and the reply — including every
+    // refusal — landed in a panel the clicker could not see, so a button that had
+    // just failed looked identical to one that had never been pressed.
+    prRequested.current = true;
+    toast.loading("Opening the deployment PR…", {
+      id: PR_TOAST,
+      description: "Pushing the staged files to a new branch.",
+    });
     void chat.send("Open the deployment PR now with the staged files.");
   };
 

@@ -259,15 +259,36 @@ async def open_deploy_pr(title: str = "", description: str = "") -> str:
             ado_repos.commit_and_push_files, s.work_dir, s.source_branch, new_branch,
             files, s.pat, pr_title,
         )
+    except Exception as exc:
+        return f"ERROR: could not push branch {new_branch}: {str(exc)[:400]} Nothing was pushed."
+    # THE BRANCH NOW EXISTS ON THE REMOTE. Everything below reports that, because it
+    # is true whatever happens next: a failure here once answered "no files have been
+    # pushed, no PR created" while the push had already landed, leaving a branch
+    # nobody knew to look for.
+    try:
         pr_url = await ado_repos.create_pull_request(
             s.ado_project or s.repo_name, s.repo_name, new_branch, s.source_branch,
             pr_title, description or "Generated deployment artifacts.", pat=s.pat,
+            # The organisation this session actually cloned and pushed with. Re-deriving
+            # it from the connector registry is what failed here: that lookup sees only
+            # tenant-wide connectors, so a per-person project credential — the kind the
+            # Integrations page saves — reads as "Azure DevOps is not configured".
+            org_url=ado_repos.org_base_from_repo_url(s.repo_url) or None,
             tenant_id=s.tenant_id,
         )
     except Exception as exc:
-        return f"ERROR opening deployment PR: {str(exc)[:400]}"
+        return (
+            f"ERROR: branch {new_branch} WAS pushed ({len(files)} file(s), commit "
+            f"{str(sha)[:8]}), but the pull request could not be opened: "
+            f"{str(exc)[:300]} Open the PR for that branch by hand, or delete the "
+            f"branch before retrying."
+        )
     if not pr_url:
-        return "ERROR: pushed the branch but could not open the PR (repo not found?)."
+        return (
+            f"ERROR: branch {new_branch} WAS pushed ({len(files)} file(s), commit "
+            f"{str(sha)[:8]}), but the PR could not be opened (repo not found?). "
+            f"Open the PR for that branch by hand, or delete the branch before retrying."
+        )
     if s.last_artifact:
         s.last_artifact["pr_url"] = pr_url
         s.last_artifact["pr_title"] = pr_title
